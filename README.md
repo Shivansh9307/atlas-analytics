@@ -30,6 +30,28 @@ it.
 
 ---
 
+## Quickstart — how to use it
+
+Want to *drive* Atlas rather than just read about it? Here's the whole loop in five
+steps:
+
+1. **Install it** (one time): `uv venv --python 3.13.9 && uv pip install -e ".[dev]"`
+2. **See a deck immediately** — run the bundled example and open the resulting
+   `runs/<run_id>/deck.pptx`.
+3. **Add your data** — drop a CSV in `data/`, register it in
+   `atlas/connectors/sources.yaml`, then `/connect` and `/profile` it. (Warehouses:
+   fill in `.env` and install the `[warehouse]` extra.)
+4. **Ask your question** — in Claude Code, `/analyze "Why did <metric> change?"`. The
+   specialist agents adapt to your data and build the deck.
+5. **Get other formats** — `/export html,slack,email <run_id>` for a web page and
+   ready-to-send summaries.
+
+> **📘 Full step-by-step operator guide, with copy-paste commands for every step →
+> [USAGE.md](USAGE.md)** — adding data sources, running commands and skills, getting the
+> PowerPoint, exporting, and troubleshooting.
+
+---
+
 ## Why you can trust the numbers
 
 Think of Atlas as a very careful analyst who refuses to cut corners. Here's what that
