@@ -53,3 +53,12 @@ sources:
   #   token_env: DATABRICKS_TOKEN
   #   byte_limit: 5000000000
   #   access: mcp:databricks
+
+  Sales:
+    dialect: duckdb
+    kind: file
+    path: ./data/Sales.xlsx
+    sheet: Sales_Data        # workbook also has a 'Business_Questions' sheet; pin the fact table
+    table_name: Sales
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed

@@ -32,3 +32,6 @@ memory/user_profile.json
 
 # os
 .DS_Store
+
+# Data Quality Copilot: runtime semantic-clean manifests (regenerated on connect)
+clean_layers/

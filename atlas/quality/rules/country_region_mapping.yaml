@@ -1,0 +1,31 @@
+# Country -> Region mapping (config over code).
+# Used by region_repair to derive Region_Clean where Region is NULL/missing.
+# Extend freely; matching is case-insensitive on the trimmed country name.
+# The `regions` block also lists the canonical region labels a Region column may
+# legitimately hold, so the detector knows which values are "already labelled".
+
+regions: [AMER, EMEA, APAC, LATAM]
+
+country_to_region:
+  # AMER
+  usa: AMER
+  united states: AMER
+  us: AMER
+  canada: AMER
+  mexico: AMER
+  # EMEA
+  uk: EMEA
+  united kingdom: EMEA
+  france: EMEA
+  germany: EMEA
+  spain: EMEA
+  italy: EMEA
+  # APAC
+  india: APAC
+  singapore: APAC
+  australia: APAC
+  japan: APAC
+  china: APAC
+  # LATAM
+  brazil: LATAM
+  argentina: LATAM

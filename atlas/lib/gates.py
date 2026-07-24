@@ -26,6 +26,7 @@ ROUTING: dict[str, tuple[str, int]] = {
     "metric_ambiguity": ("semantic-architect", 1),
     "unanswered_stakeholder_q": ("narrative-writer", 2),
     "failed_rederivation": ("sql-engineer", 2),
+    "data_not_ready": ("data-quality-copilot", 2),
 }
 
 
@@ -116,6 +117,20 @@ def gate4_provenance(orphan_claim_ids: list[str]) -> GateResult:
                for cid in orphan_claim_ids]
     return GateResult("GATE4_provenance", GateStatus.FAIL, defects,
                       summary=f"{len(orphan_claim_ids)} orphan number(s) block export")
+
+
+def gate_readiness(ready: bool, decision: str, reasons: list[str]) -> GateResult:
+    """Data Readiness Gate: the clean layer must be analysable before analysis runs.
+
+    Repairable critical issues are not blockers (high-confidence repairs auto-apply;
+    low-confidence ones are flagged pending). The gate FAILs only when the copilot
+    reports the source is not ready (score below floor or an unrepairable critical)."""
+    if ready:
+        return GateResult("GATE_readiness", GateStatus.PASS,
+                          summary=f"data ready ({decision})")
+    defects = [Defect("data_not_ready", r) for r in (reasons or ["data not ready"])]
+    return GateResult("GATE_readiness", GateStatus.FAIL, defects,
+                      summary=f"data not ready: {decision}")
 
 
 def gate5_stakeholder(unanswered: list[str]) -> GateResult:

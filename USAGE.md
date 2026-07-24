@@ -113,6 +113,45 @@ Notes:
 
 ---
 
+## 3c. Clean the data first — the Data Quality Copilot
+
+Before trusting a source, run the copilot. It scores quality (0–100 across ten
+dimensions), explains each issue's business risk, and builds a **clean layer** —
+derived `*_Clean` columns beside your raw data. **Your source file is never modified.**
+
+```bash
+# see the issues, the score, and what would be repaired
+/clean Sales --preview
+
+# build the clean layer (Sales_clean): high-confidence fixes auto-apply,
+# ambiguous ones (e.g. a fiscal-vs-calendar Quarter) wait for your approval
+/clean Sales --apply
+
+# roll back the last repair, or see the full history
+/clean Sales --undo
+/clean Sales --history
+
+# health of every dataset (score, certification, freshness, drift)
+/catalog
+```
+
+Or from Python:
+
+```bash
+uv run python -c "from atlas.connectors.registry import Registry; \
+from atlas.connectors.base import TableRef; from atlas.quality import clean_layer as cl; \
+r = cl.apply(Registry().connector('Sales'), TableRef('Sales')); \
+print('clean table:', r.clean_table, '| score', r.before.overall_score, '->', r.after.overall_score); \
+print('applied:', [t.module_id for t in r.applied], '| pending approval:', [t.module_id for t in r.skipped])"
+```
+
+When you run a full `/analyze`, this happens automatically: the copilot repairs what
+it safely can and a **Data Readiness Gate** blocks the analysis if the data still
+isn't trustworthy — telling you exactly what to approve or fix. Every repair is
+previewable, reversible, and written to `runs/<run_id>/repair/`.
+
+---
+
 ## 4. Ask a question → get a deck
 
 There are two ways to run an analysis. Pick based on your data.

@@ -12,7 +12,9 @@ nodes:
   profile:      { deps: [],                    critical: true,  timeout_s: 120, agent: source-profiler }
   frame:        { deps: [],                    critical: true,  timeout_s: 120, agent: requirements-analyst }
   semantics:    { deps: [frame],               critical: true,  timeout_s: 120, agent: semantic-architect }
-  explore:      { deps: [profile, semantics],  critical: true,  timeout_s: 240, agent: explorer }
+  quality:      { deps: [profile],             critical: true,  timeout_s: 180, agent: data-quality-copilot }  # detect->repair->clean layer
+  readiness_gate: { deps: [quality, semantics], critical: true, timeout_s: 60,  agent: data-quality-copilot }  # Data Readiness Gate
+  explore:      { deps: [profile, semantics, readiness_gate], critical: true, timeout_s: 240, agent: explorer }
   diagnose:     { deps: [explore],             critical: true,  timeout_s: 240, agent: root-cause-analyst }
   redteam:      { deps: [explore],             critical: true,  timeout_s: 240, agent: red-team-validator }   # ‖ narrative
   sizing:       { deps: [diagnose],            critical: true,  timeout_s: 120, agent: opportunity-sizer }
@@ -28,14 +30,15 @@ nodes:
 
 # Resulting tiers (informational):
 #   tier 0: profile, frame                    (parallel)
-#   tier 1: semantics
-#   tier 2: explore
-#   tier 3: diagnose, redteam                 (parallel — red-team re-derives independently)
-#   tier 4: sizing, forecast, cohort          (parallel — enrichment; forecast/cohort conditional)
-#   tier 5: narrative
-#   tier 6: deck
-#   tier 7: stakeholder
-#   tier 8: retro
+#   tier 1: quality, semantics                (quality[profile] ‖ semantics[frame])
+#   tier 2: readiness_gate                    (Data Readiness Gate — blocks analysis on bad data)
+#   tier 3: explore
+#   tier 4: diagnose, redteam                 (parallel — red-team re-derives independently)
+#   tier 5: sizing, forecast, cohort          (parallel — enrichment; forecast/cohort conditional)
+#   tier 6: narrative
+#   tier 7: deck
+#   tier 8: stakeholder
+#   tier 9: retro
 
 engine:
   max_concurrency: 3

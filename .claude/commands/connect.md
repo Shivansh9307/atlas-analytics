@@ -21,6 +21,15 @@ Register and test the data source: **$ARGUMENTS**
    `uv run python -c "from atlas.connectors.registry import Registry; r=Registry().resolve('$ARGUMENTS'); print('active:', r.active, '| chain:', r.chain)"`
    Declare a fallback in `sources.yaml` with `fallback: {csv_path|duckdb_path, table_name}`.
 
+6. **Auto-run the Data Quality Copilot** (trust before intelligence). After a
+   successful connection, detect issues and score quality so the user sees the
+   readiness state immediately:
+   `uv run python -c "from atlas.connectors.registry import Registry; from atlas.connectors.base import TableRef; from atlas.quality.pipeline import run_copilot; c=Registry().connector('$ARGUMENTS'); s=run_copilot(c, TableRef(c.table_name), source='$ARGUMENTS'); print('quality', s.score_before, '->', s.score_after, s.business_readiness, '| decision', s.decision); print('auto-repairable:', s.applied, '| pending approval:', s.pending_approval)"`
+   Report the quality score, business readiness, and which repairs are available.
+   If the score warrants it, suggest `/clean $ARGUMENTS --preview` then
+   `/clean $ARGUMENTS --apply` to build the `<table>_clean` semantic layer. This
+   materialises a clean layer in the local engine only — the source is never written.
+
 **Wizard mode** (no argument / new source): walk the user through picking a type
 (CSV/DuckDB/Postgres/Snowflake/BigQuery/Databricks), collect the env-var NAMES to set,
 add the source to `sources.yaml`, `/profile` it, and record quirks. Then confirm it

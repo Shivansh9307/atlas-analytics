@@ -71,6 +71,30 @@ about what's blocking and what's needed. That's on purpose.
 
 ---
 
+## Trust before intelligence — the Data Quality Copilot
+
+Before Atlas analyses anything, a **Data Quality Copilot** inspects your data the way
+a seasoned data engineer would. It scores quality across ten dimensions (completeness,
+freshness, consistency, type-safety, and more), explains every issue in business terms,
+and — with your approval — fixes them into a **clean layer** that sits *beside* your raw
+data. Your original file is never touched; Atlas only ever adds tidy `*_Clean` columns.
+
+A real example from a sales dataset:
+
+| Issue found | Business risk | Fix |
+|---|---|---|
+| `Region` blank for every US/Canada order (35% of rows) | Any "by region" chart silently drops North America | Fill `Region_Clean` from the country |
+| `Order_Date` stored as text | Trends and "last 90 days" filters break | Add a real date column |
+| `Quarter` uses a fiscal calendar (Sep = Q4) | Quarterly numbers land in the wrong bucket | Flagged for **your** approval — Atlas won't guess |
+
+High-confidence fixes apply automatically; anything genuinely ambiguous waits for your
+sign-off. Every repair is previewable, reversible, and logged. Run it yourself with
+**`/clean <source> --preview`**, then **`--apply`**; browse the health of every dataset
+with **`/catalog`**. When you run a full analysis, this all happens automatically and a
+**Data Readiness Gate** blocks the work if the data still isn't trustworthy enough.
+
+---
+
 ## What you receive
 
 For a full analysis, Atlas produces a complete, self-contained package. The headline
@@ -394,9 +418,20 @@ uv run python -c "from atlas.orchestrator import run_analysis; \
 r = run_analysis('Why did EMEA gross margin drop 4pts in Q2?'); \
 print(r.status, '|', r.headline); print(r.run_dir)"
 
-# the test suite (140 tests)
+# the test suite
 uv run pytest -q
+
+# clean a data source before analysis (Data Quality Copilot)
+uv run python -c "from atlas.connectors.registry import Registry; \
+from atlas.connectors.base import TableRef; from atlas.quality import clean_layer as cl; \
+pv = cl.preview(Registry().connector('Sales'), TableRef('Sales')); \
+print('quality', pv.before.overall_score, '->', pv.after.overall_score)"
 ```
+
+The Data Quality Copilot lives in `atlas/quality/` (pluggable repair modules,
+10-dimension score, semantic clean layer, readiness gate). Repair behaviour is
+config-driven (`atlas/quality/rules/*.yaml`); new repair modules and whole new
+copilots register without touching core code.
 
 Every run writes a complete audit trail to `runs/<run_id>/` — the brief, the data
 profile, the queries and their results, the findings, the red-team validation, the

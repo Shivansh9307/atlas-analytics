@@ -12,13 +12,16 @@ from atlas.connectors.registry import Registry
 from atlas.lib.query_store import QueryStore
 
 FIXTURE = ROOT / "tests" / "fixtures" / "emea_margin.csv"
+DIRTY_FIXTURE = ROOT / "tests" / "fixtures" / "dirty.xlsx"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_fixture():
+    import subprocess
     if not FIXTURE.exists():
-        import subprocess
         subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_fixture.py")], check=True)
+    if not DIRTY_FIXTURE.exists():
+        subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_dirty_fixture.py")], check=True)
 
 
 @pytest.fixture
@@ -30,5 +33,14 @@ def store(tmp_path):
 def finance(store):
     reg = Registry()
     con = reg.connector("emea_finance_csv", store=store)
+    yield con
+    con.close()
+
+
+@pytest.fixture
+def dirty(store):
+    """Connector over the engineered dirty fixture (data-quality repair tests)."""
+    from atlas.connectors.csv_duckdb import CsvDuckDBConnector
+    con = CsvDuckDBConnector("dirty_src", str(DIRTY_FIXTURE), table_name="dirty", store=store)
     yield con
     con.close()

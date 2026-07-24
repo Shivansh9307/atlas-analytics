@@ -28,8 +28,9 @@ from atlas.lib.decomposition import (
 from atlas.lib.deck_pptx import Chart, DeckSpec, Slide, build_deck
 from atlas.lib.gates import (
     GateStatus, gate1_profiling, gate2_semantics, gate3_redteam,
-    gate4_provenance, gate5_stakeholder,
+    gate4_provenance, gate5_stakeholder, gate_readiness,
 )
+from atlas.quality.pipeline import run_copilot, CopilotSummary
 from atlas.lib.profiling import profile_table, verdict_for
 from atlas.lib.provenance import ProvenanceLedger
 from atlas.lib.query_store import QueryStore
@@ -114,7 +115,11 @@ SPECS = [
     NodeSpec("profile", deps=[], critical=True),
     NodeSpec("frame", deps=[], critical=True),
     NodeSpec("semantics", deps=["frame"], critical=True),
-    NodeSpec("explore", deps=["profile", "semantics"], critical=True),
+    # Data Quality Copilot: detect -> score -> plan/preview -> auto-repair to a
+    # semantic clean layer -> Data Readiness Gate. Runs before any analysis.
+    NodeSpec("quality", deps=["profile"], critical=True),
+    NodeSpec("readiness_gate", deps=["quality", "semantics"], critical=True),
+    NodeSpec("explore", deps=["profile", "semantics", "readiness_gate"], critical=True),
     NodeSpec("diagnose", deps=["explore"], critical=True),
     NodeSpec("redteam", deps=["explore"], critical=True),
     NodeSpec("sizing", deps=["diagnose"], critical=True),
@@ -173,6 +178,35 @@ def n_semantics(ctx: RunContext) -> NodeOutcome:
         ctx.question, ctx.decision_owner, ctx.region, ctx.p1, ctx.p2, assumptions,
         f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit})."))
     return NodeOutcome(output={"metric": mdef.name})
+
+
+def n_quality(ctx: RunContext) -> NodeOutcome:
+    """Data Quality Copilot: detect issues, score, auto-repair to a semantic clean
+    layer, write the audit trail. Degrades to a clean no-op when a source has no
+    detectable issues (the EMEA fixture), so the existing flow is unchanged."""
+    summary = run_copilot(ctx.con, TableRef(ctx.table), source=ctx.source, run_dir=ctx.run_dir)
+    ctx.scratch["copilot"] = summary.as_dict()
+    ctx.write("repair/readiness.md", _render_readiness(summary))
+    # Semantic guardrails over the (possibly clean) table downstream agents read.
+    try:
+        from atlas.quality.guardrails import render_guardrails
+        ctx.write("repair/guardrails.md",
+                  render_guardrails(ctx.con, TableRef(summary.clean_table)))
+    except Exception:
+        pass  # guardrails are advisory; never break the run
+    return NodeOutcome(output=summary.as_dict())
+
+
+def n_readiness_gate(ctx: RunContext) -> NodeOutcome:
+    """Data Readiness Gate: block analysis if the clean layer is not analysable."""
+    c = ctx.scratch.get("copilot") or {}
+    g = gate_readiness(bool(c.get("ready", True)), c.get("decision", "GO"),
+                       [c.get("reason", "")] if c.get("reason") else [])
+    ctx.gates[g.gate] = g.status.value
+    if not g.passed:
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE readiness: {g.summary}")
+    return NodeOutcome(output={"ready": True, "decision": c.get("decision", "GO"),
+                               "clean_table": c.get("clean_table", ctx.table)})
 
 
 def n_explore(ctx: RunContext) -> NodeOutcome:
@@ -242,6 +276,7 @@ def n_redteam(ctx: RunContext) -> NodeOutcome:
     if report.grade == "F":
         attacks.append(f"validation grade F: {report.as_dict()['layers']}")
 
+    ctx.scratch["confidence_grade"] = report.grade
     g3 = gate3_redteam(ok, attacks)
     ctx.gates[g3.gate] = g3.status.value
     ctx.write("validation.md", _render_validation(
@@ -369,6 +404,22 @@ def n_retro(ctx: RunContext) -> NodeOutcome:
     ctx.write("retro.md", _render_retro(ctx.run_id, ctx.gates, ctx.budget))
     ctx.write("run.log", json.dumps(ctx.budget.snapshot(), indent=2))
     ctx.write("enrichment.md", _render_enrichment(ctx))
+    # Multi-level confidence + executive recommendation (orchestration intelligence).
+    try:
+        _write_confidence_and_recommendation(ctx)
+    except Exception:
+        pass  # advisory; never break a completed run
+    # Data lineage: source -> clean layer -> semantic -> SQL -> deck (via provenance).
+    try:
+        from atlas.quality.lineage import build_lineage, render_lineage
+        c = ctx.scratch.get("copilot") or {}
+        prov = [{"claim_id": cl.claim_id, "query_hash": cl.query_hash,
+                 "slide_number": cl.slide_number} for cl in ctx.ledger.all()]
+        lin = build_lineage(ctx.source, base_table=ctx.table,
+                            clean_table=c.get("clean_table"), provenance=prov)
+        ctx.write("lineage.md", render_lineage(lin))
+    except Exception:
+        pass  # lineage is advisory; never break a completed run
     _archive_headline_queries(ctx)   # feed query archaeology (guarded)
     return NodeOutcome()
 
@@ -414,6 +465,7 @@ def _archive_headline_queries(ctx: RunContext) -> None:
 
 NODE_FNS = {
     "profile": n_profile, "frame": n_frame, "semantics": n_semantics,
+    "quality": n_quality, "readiness_gate": n_readiness_gate,
     "explore": n_explore, "diagnose": n_diagnose, "redteam": n_redteam,
     "sizing": n_sizing, "forecast": n_forecast, "cohort": n_cohort,
     "narrative": n_narrative, "deck": n_deck, "stakeholder": n_stakeholder,
@@ -443,6 +495,8 @@ def _hydrate(ctx: RunContext, completed: dict) -> None:
     """Rebuild scratch + ledger from persisted node outputs (resume)."""
     if "frame" in completed:
         ctx.scratch["assumptions"] = completed["frame"].get("assumptions", [])
+    if "quality" in completed:
+        ctx.scratch["copilot"] = completed["quality"]
     if "explore" in completed:
         e = completed["explore"]
         ctx.scratch.update(
@@ -546,6 +600,52 @@ def _blocked(run_id, run_dir, gates, reason, ledger=None):
     )
     if ledger is not None:
         ledger.save(run_dir / "provenance.json")
+
+
+def _write_confidence_and_recommendation(ctx: RunContext) -> None:
+    """Roll the chain of trust into one confidence number + an exec close."""
+    from atlas.quality.confidence import grade_score, overall_confidence, render as render_conf
+    from atlas.quality.recommendations import executive_recommendation, render as render_rec
+
+    c = ctx.scratch.get("copilot") or {}
+    dec = ctx.scratch.get("dec")
+    grade = ctx.scratch.get("confidence_grade", "C")
+    simp = ctx.scratch.get("simp", {})
+    mlc = overall_confidence(
+        data_quality=float(c.get("score_after", 100.0)) / 100.0,
+        metric_definition=1.0 if ctx.gates.get("GATE2_semantics") == "PASS" else 0.5,
+        statistics=grade_score(grade),
+        business_logic=0.6 if simp.get("paradox") else 0.9,
+        narrative=1.0,
+    )
+    ctx.write("confidence.md", render_conf(mlc))
+
+    sizing = ctx.scratch.get("sizing")
+    impact = f"≈ {sizing.base:,.0f}" if sizing is not None else "not sized"
+    root_cause = (f"{ctx.region} margin move is a {dec.dominant_effect()} effect"
+                  if dec is not None else "see findings")
+    rec = executive_recommendation(
+        root_cause=root_cause,
+        recommendation="Rebalance the product mix rather than cut cost.",
+        estimated_impact=impact, confidence=mlc.band, level=3,
+        pending_approvals=c.get("pending_approval") or [],
+        has_forecast=bool((ctx.scratch.get("forecast") or {}).get("applicable")))
+    ctx.write("recommendations.md", render_rec(rec))
+
+
+def _render_readiness(s: CopilotSummary) -> str:
+    return (
+        f"# Data Readiness — {s.source}\n\n"
+        f"**Quality score:** {s.score_before:.0f} → {s.score_after:.0f}\n\n"
+        f"**Business readiness:** {s.business_readiness}\n\n"
+        f"**Decision:** {s.decision}   |   **Ready:** {'YES' if s.ready else 'NO'}\n\n"
+        f"**Semantic layer:** {s.clean_table}\n\n"
+        f"**Repairs auto-applied:** {s.applied or 'none'}\n\n"
+        f"**Pending approval:** {s.pending_approval or 'none'}\n\n"
+        f"**Unrepairable critical:** {s.unrepairable_critical or 'none'}\n\n"
+        f"**Warnings:** {s.warnings}\n\n"
+        + (f"**Reason:** {s.reason}\n" if s.reason else "")
+    )
 
 
 def _render_profile(source, report, verdict):
