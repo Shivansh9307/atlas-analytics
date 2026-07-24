@@ -1,0 +1,45 @@
+# Atlas default theme. Categorical/sequential values are the VALIDATED CVD-safe
+# palette from the dataviz skill (worst adjacent CVD ΔE 9.1 light — clears the ≥8
+# target). Swap these for your brand's ramps; keep the roles.
+
+name: default
+mode: light
+
+surface: "#fcfcfb"        # chart background
+text_primary: "#0b0b0b"
+text_secondary: "#52514e"
+grid: "#e6e5e1"           # recessive gridlines
+
+# Categorical hues in FIXED order — never cycled. A 9th series folds into "Other".
+categorical:
+  - "#2a78d6"   # blue
+  - "#eb6834"   # orange
+  - "#1baf7a"   # aqua
+  - "#eda100"   # yellow
+  - "#e87ba4"   # magenta
+  - "#008300"   # green
+  - "#4a3aa7"   # violet
+  - "#e34948"   # red
+
+# Sequential blue ramp (light->dark) for heatmaps / magnitude.
+sequential:
+  - "#cde2fb"
+  - "#9ec5f4"
+  - "#6da7ec"
+  - "#3987e5"
+  - "#256abf"
+  - "#184f95"
+  - "#0d366b"
+
+# Reserved status colors (never reused as a categorical series).
+status:
+  good: "#008300"
+  warning: "#eda100"
+  serious: "#eb6834"
+  critical: "#e34948"
+
+# One highlight color for "the bar that matters" (declutter everything else to gray).
+highlight: "#2a78d6"
+muted: "#c9c8c3"
+
+font_family: "DejaVu Sans"
