@@ -1,0 +1,37 @@
+# Atlas pipeline DAG. The engine (atlas/dag.py) topologically sorts these nodes into
+# execution tiers, runs each tier with bounded parallelism (max 3), applies per-node
+# timeout + 1 retry, a circuit breaker, and graceful degradation for non-critical nodes.
+#
+# `atlas/orchestrator.py::SPECS` is the executable source of truth and MUST match this
+# file. Edit both together when changing the graph.
+#
+# critical: true  -> a failure halts the run (no degraded deck).
+# critical: false -> a failure is skipped; dependents that need it are skipped too.
+
+nodes:
+  profile:      { deps: [],                    critical: true,  timeout_s: 120, agent: source-profiler }
+  frame:        { deps: [],                    critical: true,  timeout_s: 120, agent: requirements-analyst }
+  semantics:    { deps: [frame],               critical: true,  timeout_s: 120, agent: semantic-architect }
+  explore:      { deps: [profile, semantics],  critical: true,  timeout_s: 240, agent: explorer }
+  diagnose:     { deps: [explore],             critical: true,  timeout_s: 240, agent: root-cause-analyst }
+  redteam:      { deps: [explore],             critical: true,  timeout_s: 240, agent: red-team-validator }   # ‖ narrative
+  narrative:    { deps: [diagnose],            critical: true,  timeout_s: 180, agent: narrative-writer }
+  deck:         { deps: [narrative, redteam],  critical: true,  timeout_s: 180, agent: deck-builder }         # blocked until redteam PASS
+  stakeholder:  { deps: [deck],                critical: false, timeout_s: 120, agent: stakeholder-simulator }
+  retro:        { deps: [stakeholder],         critical: false, timeout_s: 120, agent: retrospective-agent }
+
+# Resulting tiers (informational):
+#   tier 0: profile, frame          (parallel)
+#   tier 1: semantics
+#   tier 2: explore
+#   tier 3: diagnose, redteam       (parallel — red-team re-derives independently)
+#   tier 4: narrative
+#   tier 5: deck
+#   tier 6: stakeholder
+#   tier 7: retro
+
+engine:
+  max_concurrency: 3
+  circuit_breaker: 3        # halt if this many nodes fail within one tier
+  default_timeout_s: 300
+  retries: 1

@@ -19,8 +19,12 @@ from pathlib import Path
 
 from atlas.config import PATHS, TOLERANCES
 from atlas.connectors.registry import Registry
+from atlas.dag import DagEngine, NodeOutcome, NodeSpec, NodeStatus
 from atlas.lib.budget import RunBudget
-from atlas.lib.decomposition import decompose_margin, additive_contribution, simpsons_check
+from atlas.lib.decomposition import (
+    MarginDecomposition, SegmentContribution,
+    decompose_margin, additive_contribution, simpsons_check,
+)
 from atlas.lib.deck_pptx import Chart, DeckSpec, Slide, build_deck
 from atlas.lib.gates import (
     GateStatus, gate1_profiling, gate2_semantics, gate3_redteam,
@@ -29,6 +33,7 @@ from atlas.lib.gates import (
 from atlas.lib.profiling import profile_table, verdict_for
 from atlas.lib.provenance import ProvenanceLedger
 from atlas.lib.query_store import QueryStore
+from atlas.lib.run_state import RunState
 from atlas.connectors.base import TableRef
 from atlas.semantic import resolve_metric, MetricAmbiguity
 
@@ -69,6 +74,240 @@ def _extract_hints(question: str) -> dict:
     return {"region": region, "p1": p1, "p2": p2, "metric": metric}
 
 
+# --------------------- run context + DAG nodes ---------------------
+@dataclass
+class RunContext:
+    run_id: str
+    run_dir: Path
+    question: str
+    source: str
+    table: str
+    dim: str
+    decision_owner: str
+    region: str
+    p1: str
+    p2: str
+    metric: str
+    con: object
+    store: QueryStore
+    ledger: ProvenanceLedger
+    budget: RunBudget
+    gates: dict = field(default_factory=dict)
+    artefacts: list = field(default_factory=list)
+    scratch: dict = field(default_factory=dict)
+
+    def write(self, rel: str, text: str) -> str:
+        p = self.run_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        if rel not in self.artefacts:
+            self.artefacts.append(rel)
+        return rel
+
+
+# The pipeline DAG. Mirrors .claude/agents/registry.yaml. Deps encode the waves;
+# `diagnose` and `redteam` run in parallel after `explore` (red-team ‖ narrative).
+SPECS = [
+    NodeSpec("profile", deps=[], critical=True),
+    NodeSpec("frame", deps=[], critical=True),
+    NodeSpec("semantics", deps=["frame"], critical=True),
+    NodeSpec("explore", deps=["profile", "semantics"], critical=True),
+    NodeSpec("diagnose", deps=["explore"], critical=True),
+    NodeSpec("redteam", deps=["explore"], critical=True),
+    NodeSpec("narrative", deps=["diagnose"], critical=True),
+    NodeSpec("deck", deps=["narrative", "redteam"], critical=True),
+    NodeSpec("stakeholder", deps=["deck"], critical=False),
+    NodeSpec("retro", deps=["stakeholder"], critical=False),
+]
+
+
+def _emea_rows(ctx: RunContext, quarter: str):
+    r = ctx.con.run(
+        f"SELECT {ctx.dim}, segment, revenue, cogs FROM {ctx.table} "
+        f"WHERE region = '{ctx.region}' AND quarter = '{quarter}'"
+    )
+    ctx.budget.charge_query(r.bytes_scanned)
+    return r
+
+
+def n_profile(ctx: RunContext) -> NodeOutcome:
+    report = profile_table(ctx.con, TableRef(ctx.table))
+    verdict = verdict_for(report)
+    ctx.write(f"profile/{ctx.source}.md", _render_profile(ctx.source, report, verdict))
+    g1 = gate1_profiling({ctx.source: verdict.decision})
+    ctx.gates[g1.gate] = g1.status.value
+    if not g1.passed:
+        return NodeOutcome(NodeStatus.BLOCKED, "GATE 1: no source is GO")
+    return NodeOutcome(output={"verdict": verdict.decision})
+
+
+def n_frame(ctx: RunContext) -> NodeOutcome:
+    assumptions = [
+        "'Margin' interpreted as gross margin = (revenue - cogs)/revenue.",
+        f"Comparison window: {ctx.p2} vs {ctx.p1}, {ctx.region} only.",
+        f"Grain: {ctx.dim}. Numbers are full-scan (no sampling on this local source).",
+    ]
+    ctx.scratch["assumptions"] = assumptions
+    return NodeOutcome(output={"assumptions": assumptions})
+
+
+def n_semantics(ctx: RunContext) -> NodeOutcome:
+    assumptions = ctx.scratch["assumptions"]
+    try:
+        mdef = resolve_metric(ctx.metric)
+    except MetricAmbiguity as e:
+        g2 = gate2_semantics([ctx.metric])
+        ctx.gates[g2.gate] = g2.status.value
+        ctx.write("brief.md", _render_brief(
+            ctx.question, ctx.decision_owner, ctx.region, ctx.p1, ctx.p2, assumptions, str(e)))
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 2: {e}")
+    g2 = gate2_semantics([])
+    ctx.gates[g2.gate] = g2.status.value
+    ctx.write("brief.md", _render_brief(
+        ctx.question, ctx.decision_owner, ctx.region, ctx.p1, ctx.p2, assumptions,
+        f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit})."))
+    return NodeOutcome(output={"metric": mdef.name})
+
+
+def n_explore(ctx: RunContext) -> NodeOutcome:
+    r1, r2 = _emea_rows(ctx, ctx.p1), _emea_rows(ctx, ctx.p2)
+    dec = decompose_margin(r1.rows, r2.rows, dim=ctx.dim)
+    add = additive_contribution(r1.rows, r2.rows, dim=ctx.dim, value_key="revenue")
+    simp = simpsons_check(r1.rows, r2.rows, dim=ctx.dim)
+    ctx.scratch.update(dec=dec, add=add, simp=simp,
+                       r1=(r1.query_hash, r1.result_hash),
+                       r2=(r2.query_hash, r2.result_hash))
+    ctx.write("hypotheses.md", _render_hypotheses(dec, add, simp, ctx.dim, ctx.p1, ctx.p2))
+    return NodeOutcome(output={
+        "dec": _ser_dec(dec), "add": add, "simp": simp,
+        "r1": [r1.query_hash, r1.result_hash], "r2": [r2.query_hash, r2.result_hash],
+    })
+
+
+def n_diagnose(ctx: RunContext) -> NodeOutcome:
+    dec = ctx.scratch["dec"]
+    (q1h, r1h), (q2h, r2h) = ctx.scratch["r1"], ctx.scratch["r2"]
+    ctx.ledger.record("c_gm_p1", f"{ctx.region} {ctx.p1} gross margin", round(dec.m1 * 100, 2),
+                      q1h, r1h, evidence_tier="decomposed")
+    ctx.ledger.record("c_gm_p2", f"{ctx.region} {ctx.p2} gross margin", round(dec.m2 * 100, 2),
+                      q2h, r2h, evidence_tier="decomposed")
+    ctx.ledger.record("c_delta", f"{ctx.region} margin change {ctx.p2} vs {ctx.p1} (pts)",
+                      round(dec.delta_pts, 2), q2h, r2h, evidence_tier="decomposed")
+    ctx.ledger.record("c_mix", "Mix contribution (pts)", round(dec.mix_total * 100, 2),
+                      q2h, r2h, evidence_tier="decomposed")
+    ctx.ledger.record("c_rate", "Rate contribution (pts)", round(dec.rate_total * 100, 2),
+                      q2h, r2h, evidence_tier="decomposed")
+    ctx.write("findings.md", _render_findings(ctx.region, ctx.p1, ctx.p2, dec, ctx.scratch["simp"]))
+    ctx.ledger.save(ctx.run_dir / "provenance.json")   # durable early for resume
+    if "provenance.json" not in ctx.artefacts:
+        ctx.artefacts.append("provenance.json")
+    return NodeOutcome(output={"claims": [c.claim_id for c in ctx.ledger.all()]})
+
+
+def n_redteam(ctx: RunContext) -> NodeOutcome:
+    dec = ctx.scratch["dec"]
+    rd = ctx.con.run(
+        f"SELECT quarter, sum(revenue) AS rev, sum(cogs) AS cogs "
+        f"FROM {ctx.table} WHERE region = '{ctx.region}' "
+        f"AND quarter IN ('{ctx.p1}','{ctx.p2}') GROUP BY quarter"
+    )
+    ctx.budget.charge_query(rd.bytes_scanned)
+    by = {row["quarter"]: (row["rev"], row["cogs"]) for row in rd.rows}
+    rd_m1 = (by[ctx.p1][0] - by[ctx.p1][1]) / by[ctx.p1][0] * 100
+    rd_m2 = (by[ctx.p2][0] - by[ctx.p2][1]) / by[ctx.p2][0] * 100
+    tol = TOLERANCES.rederivation_rel
+    ok = (abs(rd_m1 - dec.m1 * 100) <= abs(dec.m1 * 100) * tol and
+          abs(rd_m2 - dec.m2 * 100) <= abs(dec.m2 * 100) * tol)
+    attacks = []
+    if ctx.scratch["simp"]["paradox"]:
+        attacks.append("Simpson's paradox detected — aggregate hides opposite segment moves")
+    g3 = gate3_redteam(ok, attacks)
+    ctx.gates[g3.gate] = g3.status.value
+    ctx.write("validation.md", _render_validation(
+        ctx.region, ctx.p1, ctx.p2, dec, rd_m1, rd_m2, ok, tol, attacks))
+    if not g3.passed:
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 3: red-team veto ({g3.summary})")
+    return NodeOutcome(output={"rederivation_ok": ok, "rd_m1": rd_m1, "rd_m2": rd_m2})
+
+
+def n_narrative(ctx: RunContext) -> NodeOutcome:
+    ctx.write("narrative.md", _render_narrative(
+        ctx.region, ctx.p1, ctx.p2, ctx.scratch["dec"], ctx.decision_owner))
+    return NodeOutcome()
+
+
+def n_deck(ctx: RunContext) -> NodeOutcome:
+    dec = ctx.scratch["dec"]
+    spec = _build_deck_spec(ctx.region, ctx.p1, ctx.p2, dec, ctx.scratch["add"],
+                            ctx.decision_owner, ctx.scratch["assumptions"], ctx.ledger)
+    orphans = ctx.ledger.orphans(spec.referenced_claim_ids())
+    g4 = gate4_provenance(orphans)
+    ctx.gates[g4.gate] = g4.status.value
+    if not g4.passed:
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 4: {len(orphans)} orphan number(s)")
+    build_deck(spec, ctx.run_dir / "deck.pptx", ctx.run_dir / "speaker_notes.md")
+    for a in ("deck.pptx", "speaker_notes.md"):
+        if a not in ctx.artefacts:
+            ctx.artefacts.append(a)
+    ctx.scratch["spec"] = spec
+    return NodeOutcome()
+
+
+def n_stakeholder(ctx: RunContext) -> NodeOutcome:
+    spec = ctx.scratch["spec"]
+    unanswered = _stakeholder_check(spec, ctx.scratch["dec"], ctx.scratch["simp"])
+    g5 = gate5_stakeholder(unanswered)
+    ctx.gates[g5.gate] = g5.status.value
+    return NodeOutcome(output={"unanswered": unanswered})
+
+
+def n_retro(ctx: RunContext) -> NodeOutcome:
+    ctx.ledger.save(ctx.run_dir / "provenance.json")
+    ctx.write("retro.md", _render_retro(ctx.run_id, ctx.gates, ctx.budget))
+    ctx.write("run.log", json.dumps(ctx.budget.snapshot(), indent=2))
+    return NodeOutcome()
+
+
+NODE_FNS = {
+    "profile": n_profile, "frame": n_frame, "semantics": n_semantics,
+    "explore": n_explore, "diagnose": n_diagnose, "redteam": n_redteam,
+    "narrative": n_narrative, "deck": n_deck, "stakeholder": n_stakeholder,
+    "retro": n_retro,
+}
+
+
+def _ser_dec(dec: MarginDecomposition) -> dict:
+    return {
+        "m1": dec.m1, "m2": dec.m2, "delta": dec.delta,
+        "mix_total": dec.mix_total, "rate_total": dec.rate_total,
+        "interaction_total": dec.interaction_total,
+        "segments": [{"key": s.key, "mix": s.mix, "rate": s.rate,
+                      "interaction": s.interaction, "w1": s.w1, "w2": s.w2,
+                      "m1": s.m1, "m2": s.m2} for s in dec.segments],
+    }
+
+
+def _deser_dec(d: dict) -> MarginDecomposition:
+    segs = [SegmentContribution(**s) for s in d["segments"]]
+    return MarginDecomposition(
+        m1=d["m1"], m2=d["m2"], delta=d["delta"], mix_total=d["mix_total"],
+        rate_total=d["rate_total"], interaction_total=d["interaction_total"], segments=segs)
+
+
+def _hydrate(ctx: RunContext, completed: dict) -> None:
+    """Rebuild scratch + ledger from persisted node outputs (resume)."""
+    if "frame" in completed:
+        ctx.scratch["assumptions"] = completed["frame"].get("assumptions", [])
+    if "explore" in completed:
+        e = completed["explore"]
+        ctx.scratch.update(
+            dec=_deser_dec(e["dec"]), add=e["add"], simp=e["simp"],
+            r1=tuple(e["r1"]), r2=tuple(e["r2"]))
+    prov = ctx.run_dir / "provenance.json"
+    if prov.exists():
+        ctx.ledger = ProvenanceLedger.load(prov)
+
+
 def run_analysis(
     question: str,
     *,
@@ -77,163 +316,78 @@ def run_analysis(
     dim: str = "product_line",
     runs_root: Path | None = None,
     decision_owner: str = "VP Finance, EMEA",
+    resume_run_id: str | None = None,
 ) -> RunResult:
     runs_root = runs_root or PATHS.runs
-    run_id = new_run_id()
+
+    if resume_run_id:
+        state = RunState.load(resume_run_id, runs_root)
+        run_id = resume_run_id
+        question = state.question or question
+    else:
+        run_id = new_run_id()
+        state = RunState(run_id=run_id, question=question)
+
     run_dir = runs_root / run_id
     (run_dir / "profile").mkdir(parents=True, exist_ok=True)
-    log: list[str] = []
 
-    def w(rel: str, text: str):
-        p = run_dir / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
-        return rel
-
-    budget = RunBudget()
-    store = QueryStore(run_dir)
-    ledger = ProvenanceLedger(run_id)
-    gates: dict[str, str] = {}
-    artefacts: list[str] = []
     hints = _extract_hints(question)
-    region, p1, p2 = hints["region"], hints["p1"], hints["p2"]
-
-    reg = Registry()
-    con = reg.connector(source, store=store)
-
-    # ---------------- WAVE A: profiling (GATE 1) ----------------
-    report = profile_table(con, TableRef(table))
-    verdict = verdict_for(report)
-    profile_md = _render_profile(source, report, verdict)
-    artefacts.append(w("profile/%s.md" % source, profile_md))
-    g1 = gate1_profiling({source: verdict.decision})
-    gates[g1.gate] = g1.status.value
-    if not g1.passed:
-        return _blocked(run_id, run_dir, gates, "GATE 1: no source is GO", log, artefacts)
-
-    # ---------------- WAVE B: framing + semantics (GATE 0/2) ----------------
-    assumptions = [
-        f"'Margin' interpreted as gross margin = (revenue - cogs)/revenue.",
-        f"Comparison window: {p2} vs {p1}, {region} only.",
-        f"Grain: {dim}. Numbers are full-scan (no sampling on this local source).",
-    ]
-    try:
-        mdef = resolve_metric(hints["metric"])
-    except MetricAmbiguity as e:
-        g2 = gate2_semantics([hints["metric"]])
-        gates[g2.gate] = g2.status.value
-        w("brief.md", _render_brief(question, decision_owner, region, p1, p2, assumptions, str(e)))
-        return _blocked(run_id, run_dir, gates, f"GATE 2: {e}", log, artefacts)
-    g2 = gate2_semantics([])
-    gates[g2.gate] = g2.status.value
-    artefacts.append(w("brief.md", _render_brief(
-        question, decision_owner, region, p1, p2, assumptions,
-        f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit}).")))
-
-    # ---------------- WAVE C: exploration (hypothesis branches) ----------------
-    def emea_rows(quarter):
-        r = con.run(
-            f"SELECT {dim}, segment, revenue, cogs FROM {table} "
-            f"WHERE region = '{region}' AND quarter = '{quarter}'"
-        )
-        budget.charge_query(r.bytes_scanned)
-        return r
-
-    r1 = emea_rows(p1)
-    r2 = emea_rows(p2)
-    rows1, rows2 = r1.rows, r2.rows
-
-    dec = decompose_margin(rows1, rows2, dim=dim)
-    add = additive_contribution(rows1, rows2, dim=dim, value_key="revenue")
-    simp = simpsons_check(rows1, rows2, dim=dim)
-
-    hyp_md = _render_hypotheses(dec, add, simp, dim, p1, p2)
-    artefacts.append(w("hypotheses.md", hyp_md))
-
-    # ---------------- WAVE D: root cause + stats ----------------
-    # headline claims -> provenance ledger (numbers come only from these queries)
-    ledger.record("c_gm_p1", f"{region} {p1} gross margin", round(dec.m1 * 100, 2),
-                  r1.query_hash, r1.result_hash, evidence_tier="decomposed")
-    ledger.record("c_gm_p2", f"{region} {p2} gross margin", round(dec.m2 * 100, 2),
-                  r2.query_hash, r2.result_hash, evidence_tier="decomposed")
-    ledger.record("c_delta", f"{region} margin change {p2} vs {p1} (pts)",
-                  round(dec.delta_pts, 2), r2.query_hash, r2.result_hash,
-                  evidence_tier="decomposed")
-    ledger.record("c_mix", "Mix contribution (pts)", round(dec.mix_total * 100, 2),
-                  r2.query_hash, r2.result_hash, evidence_tier="decomposed")
-    ledger.record("c_rate", "Rate contribution (pts)", round(dec.rate_total * 100, 2),
-                  r2.query_hash, r2.result_hash, evidence_tier="decomposed")
-
-    findings_md = _render_findings(region, p1, p2, dec, simp)
-    artefacts.append(w("findings.md", findings_md))
-
-    # ---------------- WAVE E: red-team re-derivation (GATE 3) + narrative ----------------
-    # Independent re-derivation: recompute headline margins straight from raw sums
-    # via a SEPARATE query the analyst did not author.
-    rd = con.run(
-        f"SELECT quarter, sum(revenue) AS rev, sum(cogs) AS cogs "
-        f"FROM {table} WHERE region = '{region}' AND quarter IN ('{p1}','{p2}') "
-        f"GROUP BY quarter"
+    store = QueryStore(run_dir)
+    con = Registry().connector(source, store=store)
+    ctx = RunContext(
+        run_id=run_id, run_dir=run_dir, question=question, source=source, table=table,
+        dim=dim, decision_owner=decision_owner, region=hints["region"],
+        p1=hints["p1"], p2=hints["p2"], metric=hints["metric"], con=con, store=store,
+        ledger=ProvenanceLedger(run_id), budget=RunBudget(), gates=dict(state.gates),
     )
-    budget.charge_query(rd.bytes_scanned)
-    rd_by = {row["quarter"]: (row["rev"], row["cogs"]) for row in rd.rows}
-    rd_m1 = (rd_by[p1][0] - rd_by[p1][1]) / rd_by[p1][0] * 100
-    rd_m2 = (rd_by[p2][0] - rd_by[p2][1]) / rd_by[p2][0] * 100
-    tol = TOLERANCES.rederivation_rel
-    ok1 = abs(rd_m1 - dec.m1 * 100) <= abs(dec.m1 * 100) * tol
-    ok2 = abs(rd_m2 - dec.m2 * 100) <= abs(dec.m2 * 100) * tol
-    rederivation_ok = ok1 and ok2
-    surviving_attacks: list[str] = []
-    if simp["paradox"]:
-        surviving_attacks.append("Simpson's paradox detected — aggregate hides opposite segment moves")
-    g3 = gate3_redteam(rederivation_ok, surviving_attacks)
-    gates[g3.gate] = g3.status.value
-    artefacts.append(w("validation.md", _render_validation(
-        region, p1, p2, dec, rd_m1, rd_m2, rederivation_ok, tol, surviving_attacks)))
-    if not g3.passed:
-        return _blocked(run_id, run_dir, gates,
-                        f"GATE 3: red-team veto ({g3.summary})", log, artefacts, ledger)
 
-    narrative_md = _render_narrative(region, p1, p2, dec, decision_owner)
-    artefacts.append(w("narrative.md", narrative_md))
+    completed = state.completed_outputs() if resume_run_id else {}
+    _hydrate(ctx, completed)
 
-    # ---------------- WAVE F: deck (GATE 4) + stakeholder sim (GATE 5) ----------------
-    spec = _build_deck_spec(region, p1, p2, dec, add, decision_owner, assumptions, ledger)
-    # GATE 4: every referenced number resolves in the ledger
-    orphans = ledger.orphans(spec.referenced_claim_ids())
-    g4 = gate4_provenance(orphans)
-    gates[g4.gate] = g4.status.value
-    if not g4.passed:
-        return _blocked(run_id, run_dir, gates,
-                        f"GATE 4: {len(orphans)} orphan number(s)", log, artefacts, ledger)
+    def checkpoint(name: str, outcome: NodeOutcome) -> None:
+        state.record_node(name, outcome.status.value, outcome.output)
+        state.gates = dict(ctx.gates)
+        state.budget = ctx.budget.snapshot()
+        state.save(runs_root)
 
-    build_deck(spec, run_dir / "deck.pptx", run_dir / "speaker_notes.md")
-    artefacts += ["deck.pptx", "speaker_notes.md"]
+    result = DagEngine(SPECS).run(NODE_FNS, ctx, completed=completed, on_complete=checkpoint)
 
-    unanswered = _stakeholder_check(spec, dec, simp)
-    g5 = gate5_stakeholder(unanswered)
-    gates[g5.gate] = g5.status.value
-    # GATE 5 failure routes to narrative rework in the full agent pipeline; in the
-    # deterministic path we record it and still emit (all questions are covered).
+    try:
+        con.close()
+    except Exception:
+        pass
 
-    # provenance ledger persisted
-    ledger.save(run_dir / "provenance.json")
-    artefacts.append("provenance.json")
+    state.gates = dict(ctx.gates)
+    state.status = result.status
+    state.reason = result.reason
 
-    # ---------------- WAVE G: retrospective ----------------
-    artefacts.append(w("retro.md", _render_retro(run_id, gates, budget)))
+    if result.status == "COMPLETE":
+        dec = ctx.scratch["dec"]
+        headline = (f"{ctx.region} gross margin fell {abs(dec.delta_pts):.1f}pts "
+                    f"({dec.m1*100:.1f}% -> {dec.m2*100:.1f}%), "
+                    f"driven by {dec.dominant_effect()}.")
+        state.headline = headline
+        state.save(runs_root)
+        return RunResult(run_id, run_dir, "COMPLETE", gates=ctx.gates,
+                         headline=headline, artefacts=ctx.artefacts)
 
-    w("run.log", "\n".join(log) + json.dumps(budget.snapshot(), indent=2))
-    con.close()
+    if result.status == "BLOCKED":
+        _blocked(run_id, run_dir, ctx.gates, result.reason, ctx.ledger)
+        state.save(runs_root)
+        return RunResult(run_id, run_dir, "BLOCKED", blocked_reason=result.reason,
+                         gates=ctx.gates, artefacts=ctx.artefacts + ["BLOCKED.md"])
 
-    headline = (f"{region} gross margin fell {abs(dec.delta_pts):.1f}pts "
-                f"({dec.m1*100:.1f}% -> {dec.m2*100:.1f}%), driven by {dec.dominant_effect()}.")
-    return RunResult(run_id, run_dir, "COMPLETE", gates=gates,
-                     headline=headline, artefacts=artefacts)
+    # FAILED
+    (run_dir / "FAILED.md").write_text(
+        f"# Run {run_id} FAILED\n\n**Reason:** {result.reason}\n\n"
+        f"Node status: {result.node_status}\n\nResume with `/resume {run_id}` after fixing.\n")
+    state.save(runs_root)
+    return RunResult(run_id, run_dir, "FAILED", blocked_reason=result.reason,
+                     gates=ctx.gates, artefacts=ctx.artefacts + ["FAILED.md"])
 
 
 # --------------------- rendering helpers ---------------------
-def _blocked(run_id, run_dir, gates, reason, log, artefacts, ledger=None):
+def _blocked(run_id, run_dir, gates, reason, ledger=None):
     (run_dir / "BLOCKED.md").write_text(
         f"# Run {run_id} BLOCKED\n\n**Reason:** {reason}\n\n"
         f"## Gates\n" + "\n".join(f"- {k}: {v}" for k, v in gates.items()) +
@@ -242,8 +396,6 @@ def _blocked(run_id, run_dir, gates, reason, log, artefacts, ledger=None):
     )
     if ledger is not None:
         ledger.save(run_dir / "provenance.json")
-    return RunResult(run_id, run_dir, "BLOCKED", blocked_reason=reason,
-                     gates=gates, artefacts=artefacts + ["BLOCKED.md"])
 
 
 def _render_profile(source, report, verdict):
