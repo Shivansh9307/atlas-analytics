@@ -28,6 +28,7 @@ data/*
 memory/query_archive.jsonl
 memory/corrections.jsonl
 memory/miss_rate.jsonl
+memory/user_profile.json
 
 # os
 .DS_Store

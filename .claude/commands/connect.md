@@ -15,3 +15,13 @@ Register and test the data source: **$ARGUMENTS**
    `uv run python -c "from atlas.connectors.registry import Registry; print(Registry().connector('$ARGUMENTS').test_connection())"`
    and report reachable? / read-only? / latency.
 4. If creds are missing, list exactly what to add to `.env` (names only) and stop.
+5. For a resilient connect that survives a warehouse outage, use the fallback chain —
+   it tries the primary adapter, then a declared local DuckDB/CSV, and **reports the
+   active source** so the user always knows which data answered:
+   `uv run python -c "from atlas.connectors.registry import Registry; r=Registry().resolve('$ARGUMENTS'); print('active:', r.active, '| chain:', r.chain)"`
+   Declare a fallback in `sources.yaml` with `fallback: {csv_path|duckdb_path, table_name}`.
+
+**Wizard mode** (no argument / new source): walk the user through picking a type
+(CSV/DuckDB/Postgres/Snowflake/BigQuery/Databricks), collect the env-var NAMES to set,
+add the source to `sources.yaml`, `/profile` it, and record quirks. Then confirm it
+with the `resolve()` call above.

@@ -30,6 +30,18 @@ class SourceSpec:
         return self.raw.get("kind", "warehouse")
 
 
+@dataclass
+class ConnectionResult:
+    """Outcome of a fallback-aware connection attempt."""
+    connector: Connector
+    active: str                 # label of the source actually connected
+    chain: list[str]            # every attempt, in order (for transparency)
+
+    @property
+    def used_fallback(self) -> bool:
+        return len(self.chain) > 1
+
+
 class Registry:
     def __init__(self, sources_yaml: str | Path | None = None):
         self.path = Path(sources_yaml) if sources_yaml else PATHS.sources_yaml
@@ -110,3 +122,46 @@ class Registry:
             from atlas.connectors.databricks import DatabricksConnector
             return DatabricksConnector(name, raw, store=store)
         raise ValueError(f"no adapter for dialect '{spec.dialect}'")
+
+    def resolve(self, name: str, store: QueryStore | None = None) -> ConnectionResult:
+        """Connect with a fallback chain: primary -> local DuckDB -> CSV.
+
+        A source may declare `fallback: {duckdb_path|csv_path, table_name}` in
+        sources.yaml. If the primary adapter is dormant or fails its connection test,
+        the fallback is used. The active source is always reported so the caller (and
+        the user) know which data actually answered the question.
+        """
+        spec = self.get_spec(name)
+        chain: list[str] = []
+
+        # 1) primary
+        chain.append(name)
+        try:
+            con = self.connector(name, store=store)
+            check = con.test_connection()
+            if check.ok:
+                return ConnectionResult(con, active=name, chain=chain)
+            try:
+                con.close()
+            except Exception:
+                pass
+        except Exception:
+            pass  # fall through to fallback
+
+        # 2) declared fallback (local duckdb / csv)
+        fb = spec.raw.get("fallback") or {}
+        fb_path = fb.get("duckdb_path") or fb.get("csv_path")
+        if fb_path:
+            label = f"{name}:fallback"
+            chain.append(label)
+            path = fb_path if os.path.isabs(fb_path) else str(PATHS.root / fb_path)
+            con = CsvDuckDBConnector(
+                name=label, path=path, table_name=fb.get("table_name"),
+                store=store, row_limit=fb.get("row_limit"))
+            check = con.test_connection()
+            if check.ok:
+                return ConnectionResult(con, active=label, chain=chain)
+
+        raise RuntimeError(
+            f"could not connect to '{name}' and no working fallback "
+            f"(tried: {chain}). Populate .env or add a `fallback:` in sources.yaml.")

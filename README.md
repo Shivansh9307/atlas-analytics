@@ -25,6 +25,24 @@ Atlas is two layers that never blur:
 | **Deterministic backbone** | `atlas/` | The numbers, the gates, provenance, budgets | Testable without any LLM. A number here always came from a stored SQL result. |
 | **Agent layer** | `.claude/agents/` | Reasoning, judgement, prose | 12 specialists in isolated contexts. They *narrate and decide*; they don't invent numbers. |
 
+### Enterprise capabilities
+
+Beyond the core decomposition pipeline, Atlas ships:
+
+- **Resilient DAG engine** (`atlas/dag.py`) — parallel tiers, per-node timeout + retry,
+  circuit breaker, graceful degradation; runs are **tracked and resumable**
+  (`/runs`, `/resume`) with no re-query of completed work.
+- **Knowledge moat** — business glossary + metric dictionary (`/business`, `/metrics`),
+  **query archaeology** (reuse proven SQL), a session context loader, and explicit
+  **corrections** with promotion-to-code (`/log-correction`).
+- **Analytical depth** — cohort/retention, forecasting, opportunity sizing (+tornado),
+  A/B design, SQL sanity checks, and a **4-layer A–F confidence grade**.
+- **Deliverable craft** — Storytelling-with-Data charts, a self-contained **HTML** deck,
+  **Slack/email/exec** comms, guardrails + close-the-loop — every format behind the
+  same provenance gate.
+- **Routing & onboarding** — an L1–L5 **question router** (a lookup costs a lookup),
+  `/setup`, and a connection **fallback chain** that always reports the active source.
+
 Five non-negotiables (full text in `CLAUDE.md`):
 
 1. **No fabricated numbers** — every figure carries a provenance ID → query hash + result hash.
@@ -179,6 +197,18 @@ All live in `.claude/commands/`. Type `/<name>` in Claude Code; `$ARGUMENTS` is 
 | `/replay` | `<run_id>` | re-run stored queries vs current data |
 | `/retro` | `<run_id>` | force a retrospective |
 | `/lessons` | `[tag]` | `/lessons metric:gross_margin` |
+| `/runs` | `[run_id]` | list / inspect / compare pipeline runs |
+| `/resume` | `<run_id>` | resume an interrupted run (no re-query) |
+| `/route` | `"<question>"` | classify L1–L5 and route to the cheapest path |
+| `/business` | `[glossary\|term]` | browse org knowledge + metric ownership |
+| `/metrics` | `[metric]` | metric dictionary (locked formula + context) |
+| `/log-correction` | `<wrong> -> <right>` | log a correction; promotable to code |
+| `/cohort` | `<source>` | retention / vintage / LTV |
+| `/forecast` | `<metric> [horizon]` | trend + anomaly + seasonality + forecast |
+| `/size` | `"<finding>"` | opportunity sizing + tornado |
+| `/experiment` | `<base> <mde>` | A/B sample size, power, guardrails |
+| `/export` | `<fmt> <run_id>` | HTML / PDF / Slack / email / exec |
+| `/setup` | | onboarding interview (role, data, context) |
 
 ---
 
@@ -201,6 +231,11 @@ All live in `.claude/commands/`. Type `/<name>` in Claude Code; `$ARGUMENTS` is 
 | `deck-builder` | Fixed-skeleton `.pptx` + speaker notes | Sonnet |
 | `stakeholder-simulator` | 5 hardest exec questions | Opus |
 | `retrospective-agent` | Lessons + hard-artefact promotion | Opus |
+| `cohort-analyst` | Retention curves, vintage, cohort LTV | Sonnet |
+| `forecaster` | Trend / anomaly / seasonality / forecast with a band | Sonnet |
+| `opportunity-sizer` | Impact sizing + tornado sensitivity | Opus |
+| `experiment-designer` | A/B sample size, power, guardrails, decision rule | Opus |
+| `comms-drafter` | Slack / email / exec comms (provenance-checked) | Sonnet |
 
 **Invoke one directly** (skip the pipeline) with a natural request, e.g.
 `> use the source-profiler subagent to profile emea_finance_csv`, or via the Task tool
