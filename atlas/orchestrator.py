@@ -34,6 +34,7 @@ from atlas.lib.profiling import profile_table, verdict_for
 from atlas.lib.provenance import ProvenanceLedger
 from atlas.lib.query_store import QueryStore
 from atlas.lib.run_state import RunState
+from atlas.lib.validation import validate_margin_finding
 from atlas.connectors.base import TableRef
 from atlas.semantic import resolve_metric, MetricAmbiguity
 
@@ -221,13 +222,27 @@ def n_redteam(ctx: RunContext) -> NodeOutcome:
     attacks = []
     if ctx.scratch["simp"]["paradox"]:
         attacks.append("Simpson's paradox detected — aggregate hides opposite segment moves")
+
+    # 4-layer validation -> advisory A-F confidence grade. Grade F is treated as a
+    # surviving attack; A-E annotate confidence but never override the veto logic.
+    report = validate_margin_finding(
+        row_count=ctx.scratch.get("row_count", 1), profile_ok=True,
+        mix=dec.mix_total, rate=dec.rate_total, interaction=dec.interaction_total,
+        delta=dec.delta, m1=dec.m1, m2=dec.m2, paradox=ctx.scratch["simp"]["paradox"])
+    if report.grade == "F":
+        attacks.append(f"validation grade F: {report.as_dict()['layers']}")
+
     g3 = gate3_redteam(ok, attacks)
     ctx.gates[g3.gate] = g3.status.value
     ctx.write("validation.md", _render_validation(
-        ctx.region, ctx.p1, ctx.p2, dec, rd_m1, rd_m2, ok, tol, attacks))
+        ctx.region, ctx.p1, ctx.p2, dec, rd_m1, rd_m2, ok, tol, attacks) +
+        f"\n\n## Confidence grade\n**{report.grade}** (score {report.score:.2f})\n" +
+        "\n".join(f"- L:{l['layer']} {'PASS' if l['passed'] else 'FAIL'} — {l['detail']}"
+                  for l in report.as_dict()["layers"]) + "\n")
     if not g3.passed:
         return NodeOutcome(NodeStatus.BLOCKED, f"GATE 3: red-team veto ({g3.summary})")
-    return NodeOutcome(output={"rederivation_ok": ok, "rd_m1": rd_m1, "rd_m2": rd_m2})
+    return NodeOutcome(output={"rederivation_ok": ok, "rd_m1": rd_m1, "rd_m2": rd_m2,
+                               "confidence_grade": report.grade})
 
 
 def n_narrative(ctx: RunContext) -> NodeOutcome:
