@@ -1,0 +1,15 @@
+# Dimension catalogue — allowed dimensions, their columns, and known values.
+dimensions:
+  region:
+    column: region
+    values: [EMEA, AMER, APAC]
+  quarter:
+    column: quarter
+    values: [Q1, Q2, Q3, Q4]
+    ordered: true
+  product_line:
+    column: product_line
+    values: [Software, Hardware]
+  segment:
+    column: segment
+    values: [Enterprise, SMB]

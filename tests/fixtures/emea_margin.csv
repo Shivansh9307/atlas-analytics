@@ -1,0 +1,17 @@
+region,quarter,product_line,segment,revenue,cogs
+EMEA,Q1,Software,Enterprise,500,150.0
+EMEA,Q1,Software,SMB,300,90.0
+EMEA,Q1,Hardware,Enterprise,120,96.0
+EMEA,Q1,Hardware,SMB,80,64.0
+EMEA,Q2,Software,Enterprise,450,135.0
+EMEA,Q2,Software,SMB,270,81.0
+EMEA,Q2,Hardware,Enterprise,168,136.08
+EMEA,Q2,Hardware,SMB,112,87.92
+AMER,Q1,Software,Enterprise,700,224.0
+AMER,Q1,Hardware,Enterprise,300,126.0
+AMER,Q2,Software,Enterprise,710,227.2
+AMER,Q2,Hardware,Enterprise,290,121.8
+APAC,Q1,Software,SMB,400,160.0
+APAC,Q1,Hardware,SMB,200,110.0
+APAC,Q2,Software,SMB,410,164.0
+APAC,Q2,Hardware,SMB,205,112.75

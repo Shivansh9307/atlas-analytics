@@ -1,0 +1,55 @@
+# Atlas source registry. NO SECRETS HERE — creds referenced by env-var NAME only.
+# A source becomes "live" when its adapter can connect (files: always; warehouses:
+# once the referenced env vars are populated in .env).
+
+sources:
+  # --- LIVE: local fixture used by tests and the Phase 5 milestone ---
+  emea_finance_csv:
+    dialect: duckdb
+    kind: file
+    path: ./tests/fixtures/emea_margin.csv
+    table_name: finance
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  # --- DORMANT templates (uncomment + populate env vars to activate) ---
+  # prod_pg:
+  #   dialect: postgres
+  #   kind: warehouse
+  #   host_env: PG_HOST
+  #   port_env: PG_PORT
+  #   user_env: PG_USER
+  #   pass_env: PG_PASSWORD
+  #   database_env: PG_DATABASE
+  #   default_schema: analytics
+  #   row_limit: 1000000
+  #   access: driver:psycopg2   # no mature MCP; documented Python driver
+
+  # wh_snow:
+  #   dialect: snowflake
+  #   kind: warehouse
+  #   account_env: SNOW_ACCOUNT
+  #   user_env: SNOW_USER
+  #   pass_env: SNOW_PASSWORD
+  #   warehouse_env: SNOW_WAREHOUSE
+  #   database_env: SNOW_DATABASE
+  #   role_env: SNOW_ROLE
+  #   byte_limit: 5000000000
+  #   access: mcp:snowflake     # prefer official Snowflake MCP server
+
+  # lake_bq:
+  #   dialect: bigquery
+  #   kind: warehouse
+  #   project_env: BQ_PROJECT
+  #   credentials_env: GOOGLE_APPLICATION_CREDENTIALS
+  #   byte_limit: 5000000000
+  #   access: mcp:bigquery_toolbox
+
+  # lake_dbx:
+  #   dialect: databricks
+  #   kind: warehouse
+  #   host_env: DATABRICKS_SERVER_HOSTNAME
+  #   http_path_env: DATABRICKS_HTTP_PATH
+  #   token_env: DATABRICKS_TOKEN
+  #   byte_limit: 5000000000
+  #   access: mcp:databricks

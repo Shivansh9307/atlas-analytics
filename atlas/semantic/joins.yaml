@@ -1,0 +1,4 @@
+# Canonical join paths between tables. Single-table fixture needs none yet;
+# this is where multi-table warehouse joins get declared so the sql-engineer
+# never guesses a join key.
+joins: {}

@@ -1,0 +1,34 @@
+# Locked metric definitions — the ENFORCEMENT artefact for metric-definition lessons.
+# semantic-architect resolves against this file and may NOT invent a formula.
+# A metric-definition mistake that recurs gets locked here (mechanical guarantee).
+
+metrics:
+  gross_margin:
+    aliases: [margin, gross margin, gm, gross profit margin]
+    grain: [region, quarter, product_line, segment]
+    # SQL-level expression over a table exposing revenue and cogs.
+    numerator: "sum(revenue) - sum(cogs)"
+    denominator: "sum(revenue)"
+    expression: "(sum(revenue) - sum(cogs)) / sum(revenue)"
+    unit: ratio            # multiply by 100 for percentage points
+    decomposable_by: [product_line, segment, region]
+    decomposition: mix_rate_interaction
+    notes: >
+      Gross margin only. NOT contribution margin (which nets variable opex) and
+      NOT net margin (which nets all opex/tax). If a question means one of those,
+      escalate — do not silently substitute.
+
+  revenue:
+    aliases: [rev, sales, top line]
+    grain: [region, quarter, product_line, segment]
+    expression: "sum(revenue)"
+    unit: currency
+    decomposable_by: [product_line, segment, region]
+    decomposition: additive
+
+  cogs:
+    aliases: [cost of goods sold, cost]
+    grain: [region, quarter, product_line, segment]
+    expression: "sum(cogs)"
+    unit: currency
+    decomposition: additive
