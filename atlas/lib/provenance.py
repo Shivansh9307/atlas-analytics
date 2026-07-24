@@ -47,11 +47,15 @@ class ProvenanceLedger:
         evidence_tier: str = "decomposed",
         notes: str = "",
     ) -> Claim:
-        return self.add(Claim(
+        # Idempotent upsert: re-recording the same claim (e.g. on a resumed run) is
+        # fine and overwrites, rather than raising like the strict add().
+        claim = Claim(
             claim_id=claim_id, text=text, value=value,
             query_hash=query_hash, result_hash=result_hash,
             evidence_tier=evidence_tier, notes=notes,
-        ))
+        )
+        self._claims[claim_id] = claim
+        return claim
 
     def get(self, claim_id: str) -> Claim | None:
         return self._claims.get(claim_id)

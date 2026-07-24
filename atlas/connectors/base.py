@@ -67,8 +67,12 @@ class Connector(ABC):
     dialect: str = "unknown"
 
     def __init__(self, name: str, store: QueryStore | None = None):
+        import threading
         self.name = name
         self.store = store
+        # Serialises execution so parallel DAG nodes can share one connector safely
+        # (DuckDB connections are not safe for concurrent queries).
+        self._exec_lock = threading.Lock()
 
     # ---- required capabilities ----
     @abstractmethod
@@ -119,8 +123,9 @@ class Connector(ABC):
                     "Confirm explicitly (raise --max-bytes) before running."
                 )
 
-        # 3. execute
-        rows, columns, bytes_scanned = self._execute(sql)
+        # 3. execute (serialised — parallel DAG nodes may share this connector)
+        with self._exec_lock:
+            rows, columns, bytes_scanned = self._execute(sql)
 
         # 4. hash + package
         qh = hash_query(sql, self.name, self.dialect)

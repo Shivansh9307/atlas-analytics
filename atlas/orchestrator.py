@@ -35,6 +35,8 @@ from atlas.lib.provenance import ProvenanceLedger
 from atlas.lib.query_store import QueryStore
 from atlas.lib.run_state import RunState
 from atlas.lib.validation import validate_margin_finding
+from atlas.lib.sizing import Assumption, size_opportunity
+from atlas.lib.forecast import forecast as ts_forecast
 from atlas.connectors.base import TableRef
 from atlas.semantic import resolve_metric, MetricAmbiguity
 
@@ -115,7 +117,10 @@ SPECS = [
     NodeSpec("explore", deps=["profile", "semantics"], critical=True),
     NodeSpec("diagnose", deps=["explore"], critical=True),
     NodeSpec("redteam", deps=["explore"], critical=True),
-    NodeSpec("narrative", deps=["diagnose"], critical=True),
+    NodeSpec("sizing", deps=["diagnose"], critical=True),
+    NodeSpec("forecast", deps=["diagnose"], critical=False),   # conditional enrichment
+    NodeSpec("cohort", deps=["diagnose"], critical=False),     # conditional enrichment
+    NodeSpec("narrative", deps=["sizing"], critical=True),
     NodeSpec("deck", deps=["narrative", "redteam"], critical=True),
     NodeSpec("stakeholder", deps=["deck"], critical=False),
     NodeSpec("retro", deps=["stakeholder"], critical=False),
@@ -175,13 +180,18 @@ def n_explore(ctx: RunContext) -> NodeOutcome:
     dec = decompose_margin(r1.rows, r2.rows, dim=ctx.dim)
     add = additive_contribution(r1.rows, r2.rows, dim=ctx.dim, value_key="revenue")
     simp = simpsons_check(r1.rows, r2.rows, dim=ctx.dim)
+    rev_p1 = sum(float(r["revenue"]) for r in r1.rows)
+    rev_p2 = sum(float(r["revenue"]) for r in r2.rows)
     ctx.scratch.update(dec=dec, add=add, simp=simp,
                        r1=(r1.query_hash, r1.result_hash),
-                       r2=(r2.query_hash, r2.result_hash))
+                       r2=(r2.query_hash, r2.result_hash),
+                       rev_p1=rev_p1, rev_p2=rev_p2,
+                       row_count=len(r1.rows) + len(r2.rows))
     ctx.write("hypotheses.md", _render_hypotheses(dec, add, simp, ctx.dim, ctx.p1, ctx.p2))
     return NodeOutcome(output={
         "dec": _ser_dec(dec), "add": add, "simp": simp,
         "r1": [r1.query_hash, r1.result_hash], "r2": [r2.query_hash, r2.result_hash],
+        "rev_p1": rev_p1, "rev_p2": rev_p2, "row_count": len(r1.rows) + len(r2.rows),
     })
 
 
@@ -245,6 +255,84 @@ def n_redteam(ctx: RunContext) -> NodeOutcome:
                                "confidence_grade": report.grade})
 
 
+def n_sizing(ctx: RunContext) -> NodeOutcome:
+    """Opportunity-sizer: quantify the impact of the finding + a tornado. First-class
+    pipeline node — every root-cause analysis should say what it's worth."""
+    dec = ctx.scratch["dec"]
+    rev_p2 = float(ctx.scratch.get("rev_p2", 0.0))
+    recoverable_pts = abs(dec.mix_total) * 100.0     # mix-driven points, recoverable
+
+    def model(a: dict) -> float:
+        return a["recoverable_pts"] / 100.0 * a["revenue"]
+
+    assumptions = [
+        Assumption("recoverable_pts", base=recoverable_pts,
+                   low=recoverable_pts / 2, high=recoverable_pts),
+        Assumption("revenue", base=rev_p2, low=rev_p2 * 0.9, high=rev_p2 * 1.1),
+    ]
+    res = size_opportunity(assumptions, model)
+    q2h, r2h = ctx.scratch["r2"]
+    ctx.ledger.record("c_revenue_p2", f"{ctx.region} {ctx.p2} revenue", round(rev_p2, 2),
+                      q2h, r2h, evidence_tier="decomposed")
+    ctx.ledger.record("c_opportunity",
+                      f"Margin-recovery opportunity ({ctx.p2})", round(res.base, 2),
+                      q2h, r2h, evidence_tier="hypothesis")  # a sized estimate, labelled
+    ctx.scratch["sizing"] = res
+    d = res.as_dict()
+    ctx.write("sizing.md",
+              f"# Opportunity sizing\n\n"
+              f"**Base case:** recovering the mix-driven {recoverable_pts:.1f}pts on "
+              f"{ctx.region} {ctx.p2} revenue ({rev_p2:,.0f}) ≈ **{res.base:,.0f}** "
+              f"[c_opportunity].\n\n**Most sensitive to:** {d['most_sensitive_to']}.\n\n"
+              f"## Tornado\n" +
+              "\n".join(f"- {b['assumption']}: {b['low']:,.0f} … {b['high']:,.0f} "
+                        f"(swing {b['swing']:,.0f})" for b in d["tornado"]) + "\n")
+    return NodeOutcome(output={"opportunity": round(res.base, 2),
+                               "most_sensitive_to": d["most_sensitive_to"]})
+
+
+def n_forecast(ctx: RunContext) -> NodeOutcome:
+    """Forecaster (conditional enrichment): forecast the metric forward if there is
+    enough history. Non-critical — degrades gracefully when not applicable."""
+    r = ctx.con.run(
+        f"SELECT DISTINCT quarter FROM {ctx.table} "
+        f"WHERE region = '{ctx.region}' ORDER BY quarter")
+    ctx.budget.charge_query(r.bytes_scanned)
+    quarters = [row["quarter"] for row in r.rows]
+    if len(quarters) < 3:
+        info = {"applicable": False,
+                "reason": f"only {len(quarters)} period(s) of history; need ≥3"}
+        ctx.scratch["forecast"] = info
+        return NodeOutcome(output=info)
+    series = []
+    for q in quarters:
+        rq = ctx.con.run(
+            f"SELECT sum(revenue) AS rev, sum(cogs) AS cogs FROM {ctx.table} "
+            f"WHERE region = '{ctx.region}' AND quarter = '{q}'")
+        ctx.budget.charge_query(rq.bytes_scanned)
+        row = rq.rows[0]
+        series.append((row["rev"] - row["cogs"]) / row["rev"] * 100)
+    fc = ts_forecast(series, horizon=1)
+    info = {"applicable": True, "series": series, "forecast": fc.as_dict()}
+    ctx.scratch["forecast"] = info
+    return NodeOutcome(output={"applicable": True, "next": round(fc.points[0], 2)})
+
+
+def n_cohort(ctx: RunContext) -> NodeOutcome:
+    """Cohort-analyst (conditional enrichment): retention analysis if the data has an
+    entity to cohort by. Non-critical — degrades gracefully when not applicable."""
+    schema = ctx.con.get_schema(TableRef(ctx.table))
+    cols = {c.name.lower() for c in schema.columns}
+    entity = cols & {"user", "user_id", "customer", "customer_id", "account", "account_id"}
+    if not entity:
+        info = {"applicable": False, "reason": "no user/entity column to cohort by"}
+        ctx.scratch["cohort"] = info
+        return NodeOutcome(output=info)
+    # A real dataset with entities would run retention_matrix here.
+    ctx.scratch["cohort"] = {"applicable": True, "entity_column": sorted(entity)[0]}
+    return NodeOutcome(output={"applicable": True})
+
+
 def n_narrative(ctx: RunContext) -> NodeOutcome:
     ctx.write("narrative.md", _render_narrative(
         ctx.region, ctx.p1, ctx.p2, ctx.scratch["dec"], ctx.decision_owner))
@@ -280,8 +368,32 @@ def n_retro(ctx: RunContext) -> NodeOutcome:
     ctx.ledger.save(ctx.run_dir / "provenance.json")
     ctx.write("retro.md", _render_retro(ctx.run_id, ctx.gates, ctx.budget))
     ctx.write("run.log", json.dumps(ctx.budget.snapshot(), indent=2))
+    ctx.write("enrichment.md", _render_enrichment(ctx))
     _archive_headline_queries(ctx)   # feed query archaeology (guarded)
     return NodeOutcome()
+
+
+def _render_enrichment(ctx: RunContext) -> str:
+    fc = ctx.scratch.get("forecast", {"applicable": False, "reason": "not run"})
+    ch = ctx.scratch.get("cohort", {"applicable": False, "reason": "not run"})
+    sz = ctx.scratch.get("sizing")
+    lines = ["# Enrichment (conditional analytical agents)", "", "## Opportunity sizing"]
+    if sz is not None:
+        lines.append(f"- base ≈ {sz.base:,.0f}; most sensitive to "
+                     f"{sz.as_dict()['most_sensitive_to']}")
+    else:
+        lines.append("- not run")
+    lines += ["", "## Forecast"]
+    if fc.get("applicable"):
+        lines.append(f"- next-period estimate {round(fc['forecast']['points'][0], 2)}")
+    else:
+        lines.append(f"- not applicable — {fc.get('reason', '')}")
+    lines += ["", "## Cohort"]
+    if ch.get("applicable"):
+        lines.append(f"- applicable on column '{ch.get('entity_column', '')}'")
+    else:
+        lines.append(f"- not applicable — {ch.get('reason', '')}")
+    return "\n".join(lines)
 
 
 def _archive_headline_queries(ctx: RunContext) -> None:
@@ -303,6 +415,7 @@ def _archive_headline_queries(ctx: RunContext) -> None:
 NODE_FNS = {
     "profile": n_profile, "frame": n_frame, "semantics": n_semantics,
     "explore": n_explore, "diagnose": n_diagnose, "redteam": n_redteam,
+    "sizing": n_sizing, "forecast": n_forecast, "cohort": n_cohort,
     "narrative": n_narrative, "deck": n_deck, "stakeholder": n_stakeholder,
     "retro": n_retro,
 }
@@ -334,7 +447,12 @@ def _hydrate(ctx: RunContext, completed: dict) -> None:
         e = completed["explore"]
         ctx.scratch.update(
             dec=_deser_dec(e["dec"]), add=e["add"], simp=e["simp"],
-            r1=tuple(e["r1"]), r2=tuple(e["r2"]))
+            r1=tuple(e["r1"]), r2=tuple(e["r2"]),
+            rev_p1=e.get("rev_p1", 0.0), rev_p2=e.get("rev_p2", 0.0),
+            row_count=e.get("row_count", 1))
+    for opt in ("forecast", "cohort"):
+        if opt in completed:
+            ctx.scratch[opt] = completed[opt]
     prov = ctx.run_dir / "provenance.json"
     if prov.exists():
         ctx.ledger = ProvenanceLedger.load(prov)
@@ -528,12 +646,7 @@ def _render_narrative(region, p1, p2, dec, owner):
 
 def _build_deck_spec(region, p1, p2, dec, add, owner, assumptions, ledger) -> DeckSpec:
     seg = dec.segments
-    return DeckSpec(
-        title=(f"{region} gross margin fell {abs(dec.delta_pts):.0f}pts because volume "
-               f"shifted to lower-margin lines"),
-        subtitle=f"{p2} vs {p1} gross-margin decomposition",
-        decision_owner=owner,
-        slides=[
+    slides = [
             Slide("insight",
                   f"Gross margin dropped from {dec.m1*100:.1f}% to {dec.m2*100:.1f}% "
                   f"— a {abs(dec.delta_pts):.1f}pt fall",
@@ -586,7 +699,35 @@ def _build_deck_spec(region, p1, p2, dec, add, owner, assumptions, ledger) -> De
                       "weekly leading indicator so this never surprises us again. None of these "
                       "require a cost programme; all target the mechanism we identified."),
                   claim_ids=[]),
-        ],
+    ]
+
+    # Opportunity slide — inserted after the evidence slide when sizing produced a
+    # provenance-stamped estimate (opportunity-sizer node). Keeps the deck honest:
+    # the impact is a sized estimate (hypothesis tier), shown with its driver.
+    opp = ledger.get("c_opportunity")
+    rev = ledger.get("c_revenue_p2")
+    if opp is not None and rev is not None:
+        slides.insert(2, Slide(
+            "sowhat",
+            f"Recovering the mix drift is worth ≈ {opp.value:,.0f}",
+            bullets=[f"Mix-driven points recoverable: {abs(dec.mix_total)*100:.1f}pts",
+                     f"On {p2} revenue of {rev.value:,.0f}",
+                     "Sized estimate — see tornado in the appendix"],
+            chart=Chart("column", ["Opportunity"], {"Est. value": [round(opp.value, 2)]},
+                        title="Margin-recovery opportunity"),
+            speaker_notes=(
+                f"To put a number on it: recovering the mix-driven {abs(dec.mix_total)*100:.1f} "
+                f"points on {p2} revenue is worth roughly {opp.value:,.0f}. Treat this as a "
+                f"sized estimate, not a measured fact — the appendix shows the tornado, and it "
+                f"hinges most on how many of those points are actually recoverable."),
+            claim_ids=["c_opportunity", "c_revenue_p2"]))
+
+    return DeckSpec(
+        title=(f"{region} gross margin fell {abs(dec.delta_pts):.0f}pts because volume "
+               f"shifted to lower-margin lines"),
+        subtitle=f"{p2} vs {p1} gross-margin decomposition",
+        decision_owner=owner,
+        slides=slides,
         assumptions=assumptions,
         methodology=(
             "Exact mix / rate / interaction decomposition of gross margin at product_line "

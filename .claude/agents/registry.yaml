@@ -15,20 +15,27 @@ nodes:
   explore:      { deps: [profile, semantics],  critical: true,  timeout_s: 240, agent: explorer }
   diagnose:     { deps: [explore],             critical: true,  timeout_s: 240, agent: root-cause-analyst }
   redteam:      { deps: [explore],             critical: true,  timeout_s: 240, agent: red-team-validator }   # ‖ narrative
-  narrative:    { deps: [diagnose],            critical: true,  timeout_s: 180, agent: narrative-writer }
+  sizing:       { deps: [diagnose],            critical: true,  timeout_s: 120, agent: opportunity-sizer }
+  forecast:     { deps: [diagnose],            critical: false, timeout_s: 120, agent: forecaster }           # conditional enrichment
+  cohort:       { deps: [diagnose],            critical: false, timeout_s: 120, agent: cohort-analyst }       # conditional enrichment
+  narrative:    { deps: [sizing],              critical: true,  timeout_s: 180, agent: narrative-writer }
   deck:         { deps: [narrative, redteam],  critical: true,  timeout_s: 180, agent: deck-builder }         # blocked until redteam PASS
   stakeholder:  { deps: [deck],                critical: false, timeout_s: 120, agent: stakeholder-simulator }
   retro:        { deps: [stakeholder],         critical: false, timeout_s: 120, agent: retrospective-agent }
 
+# experiment-designer is intentionally NOT in the default pipeline — designing a
+# future A/B test is on-demand (/experiment), not part of explaining a past change.
+
 # Resulting tiers (informational):
-#   tier 0: profile, frame          (parallel)
+#   tier 0: profile, frame                    (parallel)
 #   tier 1: semantics
 #   tier 2: explore
-#   tier 3: diagnose, redteam       (parallel — red-team re-derives independently)
-#   tier 4: narrative
-#   tier 5: deck
-#   tier 6: stakeholder
-#   tier 7: retro
+#   tier 3: diagnose, redteam                 (parallel — red-team re-derives independently)
+#   tier 4: sizing, forecast, cohort          (parallel — enrichment; forecast/cohort conditional)
+#   tier 5: narrative
+#   tier 6: deck
+#   tier 7: stakeholder
+#   tier 8: retro
 
 engine:
   max_concurrency: 3

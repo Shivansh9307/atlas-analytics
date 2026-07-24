@@ -45,9 +45,15 @@ def test_analyze_end_to_end(tmp_path):
     assert led.get("c_mix").value == -4.0
     assert abs(led.get("c_rate").value) < 0.01
 
-    # deck has the fixed skeleton (title + 4 content + 3 appendix = 8)
+    # opportunity-sizer wired in: sized impact is provenance-stamped
+    assert led.get("c_revenue_p2").value == 1000.0        # total EMEA Q2 revenue
+    assert led.get("c_opportunity").value == 40.0         # 4pts mix on 1000 revenue
+    assert (rd / "sizing.md").exists()
+    assert (rd / "enrichment.md").exists()
+
+    # deck skeleton now includes the opportunity slide (title + 5 content + 3 appendix = 9)
     prs = Presentation(str(rd / "deck.pptx"))
-    assert len(prs.slides) == 8
+    assert len(prs.slides) == 9
 
 
 def test_analyze_blocks_on_unknown_metric(tmp_path):
