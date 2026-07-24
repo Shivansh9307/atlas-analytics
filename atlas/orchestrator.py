@@ -265,7 +265,24 @@ def n_retro(ctx: RunContext) -> NodeOutcome:
     ctx.ledger.save(ctx.run_dir / "provenance.json")
     ctx.write("retro.md", _render_retro(ctx.run_id, ctx.gates, ctx.budget))
     ctx.write("run.log", json.dumps(ctx.budget.snapshot(), indent=2))
+    _archive_headline_queries(ctx)   # feed query archaeology (guarded)
     return NodeOutcome()
+
+
+def _archive_headline_queries(ctx: RunContext) -> None:
+    """Archive the validated headline queries so future runs can reuse the pattern."""
+    try:
+        from atlas.lib import query_archive
+        tags = ["margin", "period-compare", f"by-{ctx.dim}", ctx.region.lower()]
+        for (qh, rh) in (ctx.scratch.get("r1"), ctx.scratch.get("r2")):
+            meta = ctx.store.load_query(qh)
+            if meta and meta.get("sql"):
+                query_archive.archive(
+                    meta["sql"], source=ctx.source, dialect=ctx.con.dialect,
+                    metric=ctx.metric, intent_tags=tags, result_hash=rh,
+                    run_id=ctx.run_id, notes="validated headline query")
+    except Exception:
+        pass  # archiving is best-effort; never break a completed run
 
 
 NODE_FNS = {

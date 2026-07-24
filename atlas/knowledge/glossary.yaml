@@ -1,0 +1,52 @@
+# Business glossary — plain-language term definitions the analyst team shares.
+# This is context, NOT metric formulas. Canonical metric math lives in
+# atlas/semantic/metrics.yaml (the locked, enforced definitions). A term here may
+# point at a metric by name via `metric:`.
+
+terms:
+  - term: EMEA
+    aliases: [emea]
+    definition: Sales region covering Europe, the Middle East, and Africa.
+    category: region
+
+  - term: AMER
+    aliases: [amer, americas]
+    definition: Sales region covering North and South America.
+    category: region
+
+  - term: APAC
+    aliases: [apac, asia pacific]
+    definition: Sales region covering Asia and the Pacific.
+    category: region
+
+  - term: gross margin
+    aliases: [margin, gm, gross profit margin]
+    definition: >
+      Share of revenue left after the cost of goods sold. The percentage-point
+      story most exec margin questions are really about.
+    metric: gross_margin
+    category: metric
+
+  - term: mix shift
+    aliases: [mix, product mix, revenue mix]
+    definition: >
+      A change in the revenue blend across product lines/segments. Can move a
+      blended ratio (like margin) even when every component's own rate is flat.
+    category: concept
+
+  - term: rate effect
+    aliases: [rate, unit economics]
+    definition: >
+      A change in a component's own ratio (e.g. a product line's margin),
+      holding the mix constant. Contrast with mix shift.
+    category: concept
+
+  - term: Enterprise
+    aliases: [ent, enterprise segment]
+    definition: Large-account customer segment.
+    category: segment
+
+  - term: SMB
+    aliases: [smb, small business]
+    definition: Small and mid-size business customer segment.
+    category: segment

@@ -24,5 +24,10 @@ data/*
 *.duckdb
 *.duckdb.wal
 
+# runtime-accumulating knowledge stores (per-deployment; created on first write)
+memory/query_archive.jsonl
+memory/corrections.jsonl
+memory/miss_rate.jsonl
+
 # os
 .DS_Store

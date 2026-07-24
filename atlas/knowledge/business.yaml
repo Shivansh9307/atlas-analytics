@@ -1,0 +1,36 @@
+# Organization knowledge — products, teams, metric ownership, key facts.
+# Enterprise-grade analytics needs to know WHOSE metric this is and WHO decides.
+# Populated per-deployment (this ships with the fixture's shape as an example).
+
+organization:
+  name: "Example Co (fixture)"
+  fiscal_calendar: "calendar quarters Q1-Q4"
+
+products:
+  - name: Software
+    line: Software
+    notes: High-margin product line (~70% gross margin in the fixture).
+  - name: Hardware
+    line: Hardware
+    notes: Low-margin product line (~20% gross margin in the fixture).
+
+teams:
+  - name: Finance
+    owns_metrics: [gross_margin, revenue, cogs]
+    decision_owner: "VP Finance, EMEA"
+  - name: Revenue
+    owns_metrics: [revenue]
+    decision_owner: "VP Sales"
+
+# Metric ownership + business notes. Formula authority stays in semantic/metrics.yaml.
+metric_notes:
+  gross_margin:
+    owner_team: Finance
+    watch_for: "Mix shifts between Software and Hardware move this without any rate change."
+  revenue:
+    owner_team: Revenue
+    watch_for: "Currency effects in EMEA; confirm constant-currency when comparing quarters."
+
+key_facts:
+  - "Margin questions default to GROSS margin unless the asker says contribution/net."
+  - "Quarters are compared like-for-like; watch for seasonality in H2."
