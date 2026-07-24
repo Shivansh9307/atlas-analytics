@@ -38,9 +38,12 @@ class Paths:
     atlas: Path = ROOT / "atlas"
     connectors: Path = ROOT / "atlas" / "connectors"
     semantic: Path = ROOT / "atlas" / "semantic"
+    quality: Path = ROOT / "atlas" / "quality"
+    quality_rules: Path = ROOT / "atlas" / "quality" / "rules"
     sources_yaml: Path = ROOT / "atlas" / "connectors" / "sources.yaml"
     metrics_yaml: Path = ROOT / "atlas" / "semantic" / "metrics.yaml"
     memory: Path = ROOT / "memory"
+    clean: Path = ROOT / "clean_layers"   # durable semantic-clean manifests (per source)
     lessons_jsonl: Path = ROOT / "memory" / "lessons.jsonl"
     failures_jsonl: Path = ROOT / "memory" / "failures.jsonl"
     quirks: Path = ROOT / "memory" / "quirks"

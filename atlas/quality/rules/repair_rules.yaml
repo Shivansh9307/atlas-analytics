@@ -1,0 +1,28 @@
+# Repair-module configuration (config over code).
+# Each module reads its block here: whether it is enabled, the confidence floor
+# below which a repair must be human-approved rather than auto-applied, and any
+# module-specific thresholds. NOTHING about repair behaviour is hardcoded.
+
+# Global: repairs at or above this confidence auto-apply inside the FULL-AUTO
+# pipeline; anything below pauses for approval (BLOCKED -> /resume).
+auto_apply_confidence: 0.95
+
+# Readiness gate thresholds (consumed by gate_readiness).
+readiness:
+  min_overall_score: 60       # below this -> NO-GO
+  caveats_below: 90           # below this -> GO-WITH-CAVEATS
+  max_critical_issues: 0      # any HIGH-severity structural blocker -> NO-GO
+
+modules:
+  date_repair:            { enabled: true,  min_parse_rate: 0.99 }
+  region_repair:          { enabled: true }
+  month_repair:           { enabled: true }
+  quarter_repair:         { enabled: true }
+  year_repair:            { enabled: true }
+  duplicate_detection:    { enabled: true }
+  country_standardisation:{ enabled: true }
+  numeric_type_repair:    { enabled: true,  min_parse_rate: 0.99 }
+  boolean_repair:         { enabled: true }
+  whitespace_repair:      { enabled: true }
+  case_standardisation:   { enabled: true,  min_distinct_collapse: 1 }
+  null_classification:    { enabled: true,  structural_null_rate: 0.90 }

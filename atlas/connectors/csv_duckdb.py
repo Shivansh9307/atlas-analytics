@@ -91,6 +91,29 @@ class CsvDuckDBConnector(Connector):
             f"CREATE VIEW {self.table_name} AS SELECT * FROM _{self.table_name}_df"
         )
 
+    # ---- semantic clean layer -------------------------------------------
+    def materialize_clean(self, clean_table: str, select_sql: str) -> None:
+        """Create (or replace) a derived clean VIEW in the LOCAL engine.
+
+        This is the read-only-to-source-safe write path for the semantic clean
+        layer: it issues CREATE VIEW directly on the in-memory DuckDB engine —
+        exactly as `_register()` does for the source view — and NEVER through
+        `run()`, so the source guard on CREATE stays fully intact. The source
+        file is only ever read; the clean layer lives only in local DuckDB.
+        `select_sql` is operator/module-controlled (built from repair plans and
+        the config mappings), never raw user SQL.
+        """
+        self._con.execute(f"CREATE OR REPLACE VIEW {_q_ident(clean_table)} AS {select_sql}")
+
+    def drop_clean(self, clean_table: str) -> None:
+        self._con.execute(f"DROP VIEW IF EXISTS {_q_ident(clean_table)}")
+
+    def has_table(self, name: str) -> bool:
+        row = self._con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [name]
+        ).fetchone()
+        return bool(row and row[0])
+
     # ---- Connector interface ----
     def test_connection(self) -> ConnCheck:
         try:
@@ -138,6 +161,11 @@ class CsvDuckDBConnector(Connector):
 def _sql_literal(value: str) -> str:
     """Single-quoted SQL string literal with quotes escaped."""
     return "'" + value.replace("'", "''") + "'"
+
+
+def _q_ident(ident: str) -> str:
+    """Double-quoted SQL identifier with embedded quotes escaped."""
+    return '"' + ident.replace('"', '""') + '"'
 
 
 def _safe_ident(stem: str) -> str:

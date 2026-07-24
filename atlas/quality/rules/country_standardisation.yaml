@@ -1,0 +1,25 @@
+# Country name standardisation (config over code).
+# Maps messy/variant spellings to a canonical country label. Matching is
+# case-insensitive on the trimmed value. Used by country_standardisation to
+# produce Country_Clean.
+
+canonical:
+  usa: USA
+  us: USA
+  u.s.a.: USA
+  u.s.: USA
+  united states: USA
+  united states of america: USA
+  uk: UK
+  u.k.: UK
+  united kingdom: UK
+  great britain: UK
+  england: UK
+  germany: Germany
+  deutschland: Germany
+  france: France
+  india: India
+  bharat: India
+  singapore: Singapore
+  australia: Australia
+  canada: Canada

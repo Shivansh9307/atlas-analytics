@@ -20,12 +20,19 @@ default behaviour.
 5. **READ-ONLY TO WAREHOUSES.** No INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/MERGE/
    TRUNCATE/GRANT/COPY ever reaches a source. Enforced by the PreToolUse hook
    (`.claude/hooks/pre_tool_use.py`) AND the connector layer (`atlas/lib/sqlguard.py`)
-   — defence in depth, not good intentions.
+   — defence in depth, not good intentions. The semantic **clean layer** is the ONLY
+   sanctioned write, and it is not a write to a source: it materialises derived
+   `<col>_Clean` views in the LOCAL DuckDB engine via `Connector.materialize_clean()`
+   (never through `run()`), so the source file/warehouse is only ever read. Raw is
+   sacred; warehouse clean layers are emitted as DDL for the operator to apply.
 
 ## How the pipeline runs
 Waves A–G, orchestrated deterministically by `atlas/orchestrator.py` and narrated
 by sub-agents:
 - **A** profiling (parallel per source) → GATE 1 (≥1 source GO)
+- **A′** Data Quality Copilot (`atlas/quality/`): detect issues → 10-dim quality
+  score → auto-repair to a semantic **clean layer** → Data Readiness Gate. Runs
+  before analysis (trust before intelligence); degrades to a no-op on clean data.
 - **B** framing → GATE 0; semantics → GATE 2 (metrics resolved, no ambiguity)
 - **C** exploration (3–6 isolated explorer branches, hard per-branch budget)
 - **D** root-cause decomposition + statistician
@@ -72,3 +79,13 @@ guaranteed.** Never claim otherwise.
 - `uv run pytest -q` — full test suite.
 - `uv run python -c "from atlas.orchestrator import run_analysis; print(run_analysis('...').headline)"`
 - Slash commands live in `.claude/commands/` (`/analyze`, `/profile`, `/rca`, …).
+- Data Quality Copilot: `/clean <source> [--preview|--apply|--undo|--history]`
+  (detect + score + repair to a clean layer), `/catalog [<source>]` (data catalog +
+  drift), `/cao "<question>"` (route + cost-estimate a run before executing).
+
+## Extending (plugin architecture)
+- A new **repair module**: add a `@register`-decorated `RepairModule` under
+  `atlas/quality/modules/` and import it in that package's `__init__` — nothing else
+  changes. Behaviour is config-driven via `atlas/quality/rules/*.yaml`.
+- A new **copilot** (Governance/PII/…): add a `@register_copilot` `Copilot` in
+  `atlas/quality/plugins.py`. No core edits.

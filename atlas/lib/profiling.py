@@ -64,15 +64,54 @@ def profile_table(con: Connector, table: TableRef, sample: int | None = None) ->
     else:
         grain = col_names  # unique at all-columns grain (coarse but honest)
 
+    freshness = _freshness(con, tname, schema)
+
     return ProfileReport(
         table=table,
         row_count=row_count,
         columns=columns_stats,
         duplicate_key_candidates=dup_candidates,
         grain=grain,
-        freshness=None,
+        freshness=freshness,
         warnings=warnings,
     )
+
+
+def _freshness(con: Connector, tname: str, schema) -> str | None:
+    """Max date in the table's best date column, as an ISO string, or None.
+
+    Handles a real DATE/TIMESTAMP column or a text column that TRY_CASTs to DATE
+    (the Sales `Order_Date`-as-VARCHAR case). Self-contained so profiling stays
+    decoupled from the quality package. Data-derived, hence deterministic.
+    """
+    real, textual = [], []
+    for c in schema.columns:
+        u = c.dtype.upper()
+        if u.startswith(("DATE", "TIMESTAMP")):
+            real.append(c.name)
+        elif u.startswith(("VARCHAR", "CHAR", "TEXT", "STRING")):
+            textual.append(c.name)
+
+    def _pick(names):
+        return sorted(names, key=lambda n: (0 if "date" in n.lower() else 1, n))[0] if names else None
+
+    col = _pick(real)
+    if col:
+        expr = _q(col)
+    else:
+        col = _pick(textual)
+        if not col:
+            return None
+        # only accept a text column that overwhelmingly parses as a date
+        r = con.run(
+            f"SELECT count({_q(col)}) AS nn, count(TRY_CAST({_q(col)} AS DATE)) AS ok FROM {tname}"
+        ).rows[0]
+        nn = r["nn"] or 0
+        if nn == 0 or (r["ok"] or 0) / nn < 0.99:
+            return None
+        expr = f"TRY_CAST({_q(col)} AS DATE)"
+    mx = con.run(f"SELECT CAST(max({expr}) AS VARCHAR) AS mx FROM {tname}").rows[0]["mx"]
+    return f"{mx} (max {col})" if mx else None
 
 
 def verdict_for(report: ProfileReport) -> Verdict:
@@ -90,6 +129,30 @@ def verdict_for(report: ProfileReport) -> Verdict:
         reasons.append("duplicate rows present; confirm grain before aggregating")
     # a totally-null key metric column would be NO-GO; caller passes metric cols
     return Verdict(decision, reasons)
+
+
+def verdict_from_score(report) -> Verdict:
+    """Map a quality.score.QualityReport onto the GO / GO-WITH-CAVEATS / NO-GO band.
+
+    Thresholds are config-driven (rules/repair_rules.yaml::readiness). Kept
+    separate from verdict_for() so the existing ProfileReport path is unchanged.
+    """
+    from atlas.quality.rules_loader import readiness_thresholds
+    t = readiness_thresholds()
+    reasons: list[str] = []
+    if report.row_count == 0:
+        return Verdict("NO-GO", ["table is empty"])
+    if report.critical_count > t["max_critical_issues"] or report.overall_score < t["min_overall_score"]:
+        crit = [f"{i.severity} {i.module_id}:{i.column}" for i in report.issues
+                if i.severity == "HIGH" and not i.structural]
+        return Verdict("NO-GO",
+                       [f"quality score {report.overall_score:.0f} below "
+                        f"{t['min_overall_score']:.0f} or unresolved critical issues: {crit}"])
+    if report.overall_score < t["caveats_below"]:
+        reasons.append(f"quality score {report.overall_score:.0f} "
+                       f"({report.warning_count} warning(s)); clean layer recommended")
+        return Verdict("GO-WITH-CAVEATS", reasons)
+    return Verdict("GO", [])
 
 
 def _q(ident: str) -> str:
