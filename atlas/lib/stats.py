@@ -61,6 +61,33 @@ def welch_t_test(sample_a, sample_b, alpha: float | None = None) -> TestResult:
                       f"na={len(a)} nb={len(b)}", tuple(flags))
 
 
+def correlation_test(r: float, n: int, alpha: float | None = None) -> TestResult:
+    """Significance of a Pearson (or point-biserial) correlation.
+
+    t = r * sqrt((n-2) / (1 - r^2)) on n-2 degrees of freedom. Without this a
+    correlation finding carries `significant=None`, which downstream code cannot
+    distinguish from "tested and not significant" — so an untested number would be
+    scored the same as a refuted one.
+    """
+    alpha = alpha or TOLERANCES.alpha
+    if n < 3:
+        return TestResult("correlation_t", None, None, None,
+                          f"n={n} too small", ("undefined",))
+    if abs(r) >= 1.0:
+        return TestResult("correlation_t", None, None, None,
+                          "|r| >= 1; degenerate", ("undefined",))
+    t = r * math.sqrt((n - 2) / (1 - r * r))
+    df = n - 2
+    try:
+        from scipy import stats as _sp
+        p = float(2 * _sp.t.sf(abs(t), df))
+    except Exception:
+        # df is large in every realistic case here; the normal limit is accurate.
+        p = 2 * (1 - _norm_cdf(abs(t)))
+    flags = () if n >= 30 else ("small sample (<30)",)
+    return TestResult("correlation_t", t, p, p < alpha, f"r={r:.4f}, df={df}", flags)
+
+
 def proportion_ci(x: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     """Wilson score interval — robust for small n."""
     if n == 0:

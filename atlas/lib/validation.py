@@ -97,3 +97,58 @@ def validate_margin_finding(*, row_count: int, profile_ok: bool,
         business_layer(m1, m2),
         simpson_layer(paradox),
     ])
+
+
+# --- generic layers, for playbooks whose finding is not a margin identity ---
+# `logical_layer` above asserts mix+rate+interaction == delta, which only a
+# decomposition has. These are its analogues for a ranked-driver finding.
+
+def identity_layer(parts: dict[str, float], total: float, *, tol: float = 1e-6,
+                   name: str = "identity") -> LayerResult:
+    """An accounting identity: the parts must reconstitute the whole.
+
+    For a driver ranking the identity is the law of total probability — the
+    size-weighted average of the per-segment rates must equal the overall rate. If it
+    does not, the grouping dropped or double-counted rows.
+    """
+    got = sum(parts.values())
+    ok = abs(got - total) <= tol
+    return LayerResult(name, ok, weight=1.5,
+                       detail=f"sum(parts)={got:.6f} vs total={total:.6f} (tol {tol})")
+
+
+def range_layer(values: dict[str, float], lo: float = 0.0, hi: float = 1.0
+                ) -> LayerResult:
+    """Every named value sits inside a plausible range (rates in [0,1], etc.)."""
+    bad = {k: v for k, v in values.items() if v is None or not (lo <= v <= hi)}
+    return LayerResult("business_range", not bad, weight=1.0,
+                       detail=("all in range" if not bad else f"out of [{lo},{hi}]: {bad}"))
+
+
+def sample_size_layer(n: int, *, minimum: int = 384) -> LayerResult:
+    """Enough rows for a ±5% margin at 95% confidence (the usual 384 rule of thumb)."""
+    return LayerResult("sample_size", n >= minimum, weight=1.0,
+                       detail=f"n={n} (minimum {minimum})")
+
+
+def effect_significance_layer(significant: bool | None, effect: float,
+                              *, min_effect: float = 0.0) -> LayerResult:
+    """The headline driver is both statistically and materially distinguishable."""
+    ok = bool(significant) and abs(effect) > min_effect
+    return LayerResult("top_effect", ok, weight=1.0,
+                       detail=f"significant={significant}, |effect|={abs(effect):.4f}")
+
+
+def validate_ranked_findings(*, row_count: int, profile_ok: bool,
+                             weighted_parts: dict[str, float], overall_rate: float,
+                             rates: dict[str, float],
+                             top_significant: bool | None, top_effect: float,
+                             tol: float = 1e-6) -> ValidationReport:
+    """The ranked-driver analogue of `validate_margin_finding`."""
+    return grade_layers([
+        structural_layer(row_count, profile_ok),
+        identity_layer(weighted_parts, overall_rate, tol=tol, name="rate_identity"),
+        range_layer(rates),
+        sample_size_layer(row_count),
+        effect_significance_layer(top_significant, top_effect),
+    ])
