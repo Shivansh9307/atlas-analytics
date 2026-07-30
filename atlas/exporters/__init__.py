@@ -12,6 +12,7 @@ from atlas.lib.export_registry import (  # noqa: F401
 
 from atlas.exporters import builtin        # noqa: F401,E402
 from atlas.exporters import dax_measures   # noqa: F401,E402
+from atlas.exporters import pbip           # noqa: F401,E402
 
 __all__ = ["Exporter", "ExportContext", "UnknownExportFormat", "ExportUnavailable",
            "register_exporter", "get_exporter", "all_exporters", "EXPORTER_REGISTRY"]
