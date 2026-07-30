@@ -116,7 +116,9 @@ deliverable is a slide deck that follows the same trustworthy shape every time:
 Alongside the deck you also get **speaker notes** for each slide (about a minute of
 talking track), a **web page version** you can open in any browser or email to anyone,
 and ready-to-send **Slack, email, and one-paragraph executive summaries** — all drawn
-from the same validated numbers.
+from the same validated numbers. For driver and risk questions, Atlas can also hand
+back a **ready-to-open Power BI project** — the dashboard, charts, and KPI page
+already laid out, not a file you have to assemble yourself.
 
 ---
 
@@ -206,7 +208,9 @@ A few things on an Atlas deck are worth knowing how to read:
   **decomposed** (proven by the math) → **tested** (statistically significant) →
   **correlational** (moves together, cause unproven) → **hypothesis** (plausible, not
   yet shown). A recommendation resting on a "hypothesis" deserves more caution than one
-  resting on "decomposed."
+  resting on "decomposed." A number that comes from a statistical model (like a risk
+  score) is never invented either — it always traces back to the exact data it was
+  trained on, and it's always labelled correlational, never presented as a proven cause.
 - **"What it's worth" and the tornado.** When Atlas sizes an opportunity, it never gives
   a single false-precision number. It gives a base estimate *and* a "tornado" chart
   showing which assumption the number depends on most — so you know where the risk sits.
@@ -229,6 +233,14 @@ You don't need the full pipeline every time. Atlas matches the effort to the que
   in under a couple of minutes.
 - **A single chart** — "Make a clean chart of the checkout funnel." → one publication-
   quality visual.
+- **What's driving something** — "What's driving customer churn?" → a ranked list of
+  the strongest factors, calling out any sharp cutoffs a plain average would hide
+  (e.g. *"churn jumps once payment is 16+ days late"* — a cliff, not a gradual slope).
+  Every factor is measured and labelled as an association, never presented as a
+  proven cause.
+- **Who's likely to do something** — "Who's about to churn?" → a risk-ranked list of
+  individuals with plain-English reasons for each score. Never a black box: every
+  factor behind a score is shown with its direction and strength, not just a number.
 - **A forecast** — "Where is this metric heading?" → a projection **with an honest
   uncertainty range** (only when there's enough history; otherwise Atlas says so).
 - **An experiment design** — "How should we A/B test the new checkout?" → sample size,
@@ -260,12 +272,13 @@ that structure is exactly what makes it careful. Three ideas:
 The full reference is below — expand what you're curious about.
 
 <details>
-<summary><strong>The analytics team — 17 specialist agents</strong></summary>
+<summary><strong>The analytics team — 18 specialist agents</strong></summary>
 
 | Agent | What it does | When |
 |---|---|---|
 | requirements-analyst | Turns your plain-English ask into a precise brief and writes down any assumptions | Framing |
 | source-profiler | Checks the data is complete and trustworthy; issues a GO / NO-GO | Framing |
+| data-quality-copilot | Scores your data across 10 dimensions and auto-repairs it into a clean layer before any analysis runs | Framing |
 | semantic-architect | Pins down exactly what each metric means, from the locked definitions | Framing |
 | sql-engineer | Writes the careful, read-only, cost-aware queries and stores every one | Throughout |
 | explorer | Chases several possible explanations at once, each in isolation | Exploration |
@@ -285,7 +298,7 @@ The full reference is below — expand what you're curious about.
 </details>
 
 <details>
-<summary><strong>The full menu — 25 commands</strong></summary>
+<summary><strong>The full menu — 28 commands</strong></summary>
 
 **Ask & answer**
 | Command | What it does |
@@ -294,6 +307,7 @@ The full reference is below — expand what you're curious about.
 | `/quick "<question>"` | A fast, single-number answer with a chart |
 | `/rca <metric> <window>` | Root-cause only (skips the framing stage) |
 | `/route "<question>"` | Suggests the cheapest path that answers your question |
+| `/cao "<question>"` | Plans a run before you commit to it: the path, the agents involved, and the estimated cost |
 
 **Analytical tools**
 | Command | What it does |
@@ -316,7 +330,7 @@ The full reference is below — expand what you're curious about.
 **Share & revisit**
 | Command | What it does |
 |---|---|
-| `/export <format> <run_id>` | Export to HTML / PDF / Slack / email / exec summary |
+| `/export <format> <run_id>` | Export to HTML / PDF / Slack / email / exec summary / a ready-to-open Power BI project |
 | `/runs [run_id]` | List, inspect, and compare past analyses |
 | `/resume <run_id>` | Resume an interrupted run where it left off |
 | `/replay <run_id>` | Re-run a past analysis against today's data to see if it still holds |
@@ -330,16 +344,18 @@ The full reference is below — expand what you're curious about.
 | `/log-correction "<wrong> -> <right>"` | Log a correction so it isn't repeated |
 | `/retro <run_id>` | Force a post-run retrospective |
 
-**Setup**
+**Setup & data quality**
 | Command | What it does |
 |---|---|
 | `/connect <source>` | Register and test a data source (read-only) |
 | `/setup` | Onboarding interview — teach Atlas your role, data, and context |
+| `/clean <source>` | Detect and fix data-quality issues into a clean layer (preview, then apply) |
+| `/catalog [source]` | Browse every dataset's health, owner, and freshness at a glance |
 
 </details>
 
 <details>
-<summary><strong>The playbooks it follows — 15 skills</strong></summary>
+<summary><strong>The playbooks it follows — 16 skills</strong></summary>
 
 | Skill | What it covers |
 |---|---|
@@ -348,6 +364,7 @@ The full reference is below — expand what you're curious about.
 | root-cause-playbooks | Named recipes: revenue drop, margin compression, churn spike, funnel leak… |
 | advanced-analytics | Cohorts, forecasting, opportunity sizing, experiments, the A–F confidence grade |
 | data-profiling | The standard data-quality checks and how to read them |
+| data-repair | Fixing what data-profiling finds — safe, reversible repairs into a clean layer, raw data never touched |
 | data-connectors | Connecting to files and warehouses, safely and read-only |
 | sql-dialects | The differences between Snowflake / BigQuery / Postgres / Databricks / DuckDB |
 | validation-protocol | The independent re-derivation and veto rules the red-team uses |
@@ -436,8 +453,8 @@ copilots register without touching core code.
 Every run writes a complete audit trail to `runs/<run_id>/` — the brief, the data
 profile, the queries and their results, the findings, the red-team validation, the
 narrative, the deck (`.pptx` + `.html`), the comms drafts, and `provenance.json` (the
-number-to-query ledger). Analysts drive Atlas through the **25 slash commands, 17
-specialist agents, and 15 skills** listed in
+number-to-query ledger). Analysts drive Atlas through the **28 slash commands, 18
+specialist agents, and 16 skills** listed in
 [*Under the hood*](#under-the-hood--the-team-the-playbooks-and-the-menu) above; each
 agent, command, and skill is a plain markdown file in `.claude/` that you can read and
 edit. Data sources are registered read-only in `atlas/connectors/sources.yaml`.
@@ -445,7 +462,10 @@ edit. Data sources are registered read-only in `atlas/connectors/sources.yaml`.
 - **The rules Atlas operates under:** `CLAUDE.md` (the project constitution — the
   non-negotiables described above, in full).
 - **The analytical engine:** `atlas/` (connectors, the provenance ledger, the
-  decomposition/forecast/sizing math, the quality gates, the deck builders).
+  decomposition/forecast/sizing math, the quality gates, the deck builders). It's
+  pluggable — new analysis types and export formats register as plugins under
+  `atlas/playbooks/` and `atlas/exporters/` respectively, without touching core code;
+  see `CLAUDE.md` for the extension points.
 - **The specialist agents, commands, and skills:** the `.claude/` folder.
 
 Atlas is read-only to every data source, enforced in two independent places, and no
