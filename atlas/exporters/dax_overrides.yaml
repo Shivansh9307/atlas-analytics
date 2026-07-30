@@ -1,0 +1,18 @@
+# Hand-written DAX for metrics the transpiler refuses to compile.
+#
+# The transpiler escalates rather than approximating: a window function, a join or a
+# subquery in a metric definition raises DaxUnsupported instead of emitting DAX that
+# looks plausible and computes something else. This file is the sanctioned escape
+# hatch — a measure listed here is emitted verbatim and labelled `override` in
+# DAX_MEASURES.md, so a hand-authored formula is never mistaken for a compiled one.
+#
+# Key is the metric name as it appears in atlas/semantic/metrics.yaml.
+#
+# measures:
+#   revenue_per_active_user: |
+#     DIVIDE(
+#         [Revenue],
+#         CALCULATE(DISTINCTCOUNT(Sales[customer_id]), Sales[status] = "Active")
+#     )
+
+measures: {}
