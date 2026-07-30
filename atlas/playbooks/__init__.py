@@ -19,6 +19,7 @@ from atlas.playbooks.binding import (  # noqa: F401
 # Concrete playbooks — import to register.
 from atlas.playbooks import margin       # noqa: F401,E402
 from atlas.playbooks import descriptive  # noqa: F401,E402
+from atlas.playbooks import logistic     # noqa: F401,E402
 
 __all__ = [
     "Playbook", "PlaybookResult", "PlaybookBlocked", "ClaimSpec", "Rederivation",

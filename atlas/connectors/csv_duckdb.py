@@ -108,6 +108,28 @@ class CsvDuckDBConnector(Connector):
     def drop_clean(self, clean_table: str) -> None:
         self._con.execute(f"DROP VIEW IF EXISTS {_q_ident(clean_table)}")
 
+    def materialize_scores(self, table_name: str, rows: list[dict]) -> None:
+        """Register model output as a LOCAL DuckDB view. Never a write to the source.
+
+        Sibling of `materialize_clean()`, and it exists for a provenance reason
+        rather than a convenience one. With predictions queryable, every downstream
+        number *about* the model — high-risk count, revenue at risk, churn rate by
+        tier, the confusion matrix — becomes an ordinary `run()` result carrying real
+        query and result hashes. Without it, each of those would be a Python sum the
+        ledger has to take on trust, multiplying the derived surface for no reason.
+
+        Like the clean layer this goes straight to the in-memory engine, never
+        through `run()`, so the read-only guard on CREATE stays fully intact.
+        """
+        if not rows:
+            raise ValueError("materialize_scores() needs at least one row")
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        self._con.register(f"_{table_name}_df", df)
+        self._con.execute(
+            f"CREATE OR REPLACE VIEW {_q_ident(table_name)} AS "
+            f"SELECT * FROM _{table_name}_df")
+
     def has_table(self, name: str) -> bool:
         row = self._con.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [name]

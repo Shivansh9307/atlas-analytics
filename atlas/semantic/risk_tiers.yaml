@@ -1,0 +1,30 @@
+# Locked risk-tier definitions.
+#
+# This sits beside metrics.yaml because a risk tier IS a locked business definition
+# in exactly the sense that file exists to enforce. It is read by BOTH the
+# risk_scores.csv writer and the Power BI semantic-model emitter, so the exported
+# file and the dashboard cannot silently disagree about what "High risk" means.
+#
+# Nobody hand-writes 0.40 or 0.70 anywhere else in the codebase.
+
+tiers:
+  default:
+    score_field: churn_probability
+    method: fixed_probability          # fixed_probability | quantile
+    bands:
+      - {name: Low,    min: 0.00, max: 0.40}
+      - {name: Medium, min: 0.40, max: 0.70}
+      - {name: High,   min: 0.70, max: 1.01}   # max is exclusive; 1.01 includes p=1.0
+
+    flag_threshold: 0.50
+    flag_threshold_note: >
+      0.50 is the MODELLING default, not a business decision. The operating cutoff
+      for "who gets flagged and contacted" should be set from the relative cost of
+      missing a churner versus interrupting a loyal customer, which is rarely
+      symmetric. Change it HERE and re-run — never by post-processing the scores,
+      which would put the CSV and the dashboard out of agreement.
+
+    notes: >
+      Bands are on predicted probability, not on rank. That means tier sizes vary
+      with the model and the population; a quantile method would fix the sizes but
+      make "High" mean something different every run.
