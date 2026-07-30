@@ -32,3 +32,49 @@ metrics:
     expression: "sum(cogs)"
     unit: currency
     decomposition: additive
+
+  customer_churn_rate:
+     aliases:
+      - churn
+      - churn rate
+      - customer churn
+      - customer churn rate
+      - logo churn
+
+     grain:
+      - year
+      - quarter
+      - month
+      - region
+      - segment
+      - industry
+      - subscription_plan
+
+     numerator: >
+      count(distinct case
+        when customer_status = 'Churned'
+        then customer_id
+      end)
+
+     denominator: >
+      count(distinct customer_id)
+
+     expression: >
+      count(distinct case
+        when customer_status = 'Churned'
+        then customer_id
+      end)
+      /
+      count(distinct customer_id)
+
+     unit: ratio
+
+     decomposition: non_decomposable
+
+     notes: >
+      Customer-grain metric. A customer counts as churned if ANY order
+      during the selected period has Customer_Status='Churned'. This is
+      NOT an order-level churn rate. If the user requests subscription
+      churn, revenue churn, latest-status churn, or another churn
+      definition, semantic-architect MUST escalate rather than
+      substituting this metric.
