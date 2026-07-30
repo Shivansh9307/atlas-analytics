@@ -37,11 +37,15 @@ by sub-agents:
 - **A′** Data Quality Copilot (`atlas/quality/`): detect issues → 10-dim quality
   score → auto-repair to a semantic **clean layer** → Data Readiness Gate. Runs
   before analysis (trust before intelligence); degrades to a no-op on clean data.
-- **B** framing → GATE 0; semantics → GATE 2 (metrics resolved, no ambiguity)
-- **C** exploration (3–6 isolated explorer branches, hard per-branch budget)
-- **D** root-cause decomposition + statistician
+- **B** framing (+ L1–L5 routing recorded) → GATE 0; semantics → GATE 2 (metric
+  resolved, **playbook selected, column roles bound**) — an unbindable table blocks
+  here, before a single exploration query is spent
+- **C** exploration (playbook-specific SQL) → **model** (optional fit; no-op for
+  aggregate playbooks)
+- **D** diagnosis + statistician
 - **E** red-team ‖ narrative → GATE 3 (PASS + independent re-derivation in tolerance)
-- **F** deck-builder → GATE 4 (no orphan numbers) → stakeholder-sim → GATE 5
+- **F** deck-builder → GATE 4 (no orphan numbers, no unfingerprinted derived numbers)
+  → **emit** (extra exports) ‖ stakeholder-sim → GATE 5
 - **G** retrospective
 
 Runs **FULL AUTO**: stop only on hard failure, a gate past its rework cap, or a
@@ -62,15 +66,38 @@ commands, skills, hooks). `atlas/llm.py` is an optional, non-numeric shim.
   evaluators + `ROUTING`), `query_store.py` (query/result hashing + persistence),
   `sqlguard.py` (read-only assertion), `run_state.py` (resume checkpoints);
   `decomposition.py` / `stats.py` / `forecast.py` / `cohort.py` / `sizing.py` /
-  `experiment.py` (the math); `deck_pptx.py` / `deck_html.py` / `charts.py` /
-  `exporters.py` (output); `router.py`, `budget.py`, `corrections.py`, `query_archive.py`.
+  `experiment.py` (the math); `deck_pptx.py` / `deck_html.py` / `deck_gslides.py` /
+  `charts.py` / `exporters.py` / `theme_loader.py` (output); `router.py`, `budget.py`,
+  `corrections.py`, `query_archive.py`, `context_loader.py` (session context bundle),
+  `sql_sanity.py`, `validation.py`, `export_gate.py`, `onboarding.py`, `comms.py`,
+  `close_the_loop.py`, `profiling.py`.
 - `atlas/quality/` — the Data Quality Copilot. `pipeline.py::run_copilot()` is the entry
   point the `quality` node calls; `modules/` holds the pluggable repairs, `rules/*.yaml`
   their config, `clean_layer.py` builds/previews/applies/undoes the clean layer,
-  `score.py` the 10-dimension score, `plugins.py` the copilot registry.
-- `atlas/semantic/` (`metrics.yaml` + `resolve_metric()`), `atlas/connectors/`
-  (`base.py` interface, `registry.py` + `sources.yaml`, one adapter per dialect),
-  `atlas/knowledge/` (glossary / business YAML).
+  `score.py` the 10-dimension score, `plugins.py` the copilot registry. Also:
+  `detectors.py` (issue detection), `catalog.py` (`/catalog`), `cao.py` (`/cao` routing
+  + cost estimate), `drift.py`, `guardrails.py`, `confidence.py`, `impact.py`,
+  `lineage.py`, `recommendations.py`, `repair_memory.py`, plus `pandas_engine.py` /
+  `sql_engine.py` as the two execution backends.
+- `atlas/playbooks/` — **one analysis shape per plugin**, which is what makes the
+  engine general. `base.py` (the `Playbook` ABC, `ClaimSpec`, `Rederivation`,
+  `FeaturePlan`, `@register_playbook`, `select_playbook()`), `binding.py`
+  (`ColumnRole` / `resolve_binding()` — how a playbook declares the columns it needs
+  instead of hardcoding a schema), `margin.py` (gross-margin mix/rate),
+  `descriptive.py` (schema-agnostic driver ranking + threshold detection),
+  `logistic.py` (interpretable model + per-entity risk scores).
+- `atlas/exporters/` — one output format per plugin (`@register_exporter` over
+  `atlas/lib/export_registry.py`): `builtin.py` (html/pdf/slack/email/exec),
+  `dax.py` (sqlglot AST → DAX, refuses rather than approximating), `dax_measures.py`,
+  `pbip/` (Power BI project: `schemas.py` records every verified format constant,
+  `tmdl.py`, `pbir.py`, `layout.py`).
+- Driver-analysis maths, all schema-agnostic: `atlas/lib/assoc.py` (chi-square,
+  Cramér's V, Cohen's d, odds/risk ratios), `thresholds.py` (cliff detection),
+  `binning.py`, `classify.py` (ROC-AUC etc., no scikit-learn), `logit.py`
+  (statsmodels wrapper), `model_provenance.py`, `risk_tiers.py`, `sqlident.py`.
+- `atlas/semantic/` (`metrics.yaml` + `resolve_metric()`, `risk_tiers.yaml` +
+  `load_policy()`), `atlas/connectors/` (`base.py` interface, `registry.py` +
+  `sources.yaml`, one adapter per dialect), `atlas/knowledge/` (glossary/business YAML).
 - `.claude/` — `agents/*.md` plus `agents/registry.yaml` (the DAG mirror),
   `commands/*.md` (slash commands), `skills/*/SKILL.md` (some with runnable
   `scripts/*.py`), `hooks/` (pre/post tool use + stop).
@@ -131,7 +158,25 @@ guaranteed.** Never claim otherwise.
 ## Invariants when changing the engine
 - **`atlas/orchestrator.py::SPECS` and `.claude/agents/registry.yaml` are edited
   together.** `SPECS` is executable truth; the YAML is the documented mirror carrying
-  the owning agent per node and the resulting tiers. Drift between them is a silent bug.
+  the owning agent per node, `timeout_s`, and the resulting tiers. Drift is a silent
+  bug — `tests/test_registry_drift.py` checks every field, including the tier comment.
+- **A model-derived number goes through `ProvenanceLedger.record_derived()`,** never
+  `record()`. Its `query_hash` is the real training query and its `result_hash` is a
+  `ModelFingerprint` digest persisted under `runs/<id>/model/`. The method **raises**
+  on any tier above `correlational`: an observational fit is never `tested` or
+  `decomposed`, whatever the p-value. GATE 4 blocks a derived claim whose fingerprint
+  was not written.
+- **Prefer measuring to deriving.** `Connector.materialize_scores()` registers model
+  output as a LOCAL DuckDB view so numbers *about* a model (tier counts, confusion
+  matrix) are ordinary SQL results with real hashes. Only coefficients and the scored
+  file stay derived.
+- **Risk-tier bands live only in `atlas/semantic/risk_tiers.yaml`.** `TierPolicy`
+  renders them to Python, SQL and DAX; never hand-write a threshold anywhere else.
+- **A feature the descriptive stage measured as non-linear must be binned before it
+  is modelled.** `LogisticPlaybook` raises rather than fitting a linear term through
+  a known staircase.
+- **The DAX transpiler escalates rather than approximating.** A measure that looks
+  plausible and computes something else is worse than a missing one.
 - **`NodeOutcome.output` must be JSON-serialisable.** `RunState.record_node()` persists
   it after every node so `/resume` can skip completed work. Dataclasses go through the
   `_ser_dec()` / `_deser_dec()` pattern.
@@ -149,6 +194,14 @@ guaranteed.** Never claim otherwise.
   never retries it.
 
 ## Extending (plugin architecture)
+- A new **analysis shape**: add a `@register_playbook` `Playbook` under
+  `atlas/playbooks/` and import it in that package's `__init__`. Declare the columns
+  it needs as `ColumnRequirement`s rather than hardcoding names, and list the
+  `metrics.yaml` `decomposition:` values it can execute in `supported_decompositions`
+  — that set is what stops a metric being handed to maths that cannot compute it.
+- A new **output format**: add a `@register_exporter` `Exporter` under
+  `atlas/exporters/` and import it. An unknown format id raises rather than silently
+  producing nothing.
 - A new **repair module**: add a `@register`-decorated `RepairModule` under
   `atlas/quality/modules/` and import it in that package's `__init__` — nothing else
   changes. Behaviour is config-driven via `atlas/quality/rules/*.yaml`.
