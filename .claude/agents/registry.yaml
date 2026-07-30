@@ -11,34 +11,38 @@
 nodes:
   profile:      { deps: [],                    critical: true,  timeout_s: 120, agent: source-profiler }
   frame:        { deps: [],                    critical: true,  timeout_s: 120, agent: requirements-analyst }
-  semantics:    { deps: [frame],               critical: true,  timeout_s: 120, agent: semantic-architect }
+  semantics:    { deps: [frame, quality],      critical: true,  timeout_s: 120, agent: semantic-architect }  # also binds column roles, so it needs the clean layer
   quality:      { deps: [profile],             critical: true,  timeout_s: 180, agent: data-quality-copilot }  # detect->repair->clean layer
   readiness_gate: { deps: [quality, semantics], critical: true, timeout_s: 60,  agent: data-quality-copilot }  # Data Readiness Gate
   explore:      { deps: [profile, semantics, readiness_gate], critical: true, timeout_s: 240, agent: explorer }
-  diagnose:     { deps: [explore],             critical: true,  timeout_s: 240, agent: root-cause-analyst }
-  redteam:      { deps: [explore],             critical: true,  timeout_s: 240, agent: red-team-validator }   # ‖ narrative
+  model:        { deps: [explore],             critical: true,  timeout_s: 600, agent: statistician }         # optional fit; no-op for aggregate playbooks
+  diagnose:     { deps: [explore, model],      critical: true,  timeout_s: 240, agent: root-cause-analyst }
+  redteam:      { deps: [explore, model],      critical: true,  timeout_s: 240, agent: red-team-validator }   # ‖ narrative
   sizing:       { deps: [diagnose],            critical: true,  timeout_s: 120, agent: opportunity-sizer }
   forecast:     { deps: [diagnose],            critical: false, timeout_s: 120, agent: forecaster }           # conditional enrichment
   cohort:       { deps: [diagnose],            critical: false, timeout_s: 120, agent: cohort-analyst }       # conditional enrichment
   narrative:    { deps: [sizing],              critical: true,  timeout_s: 180, agent: narrative-writer }
   deck:         { deps: [narrative, redteam],  critical: true,  timeout_s: 180, agent: deck-builder }         # blocked until redteam PASS
+  emit:         { deps: [deck],                critical: false, timeout_s: 300, agent: deck-builder }         # extra exports; must not kill a validated run
   stakeholder:  { deps: [deck],                critical: false, timeout_s: 120, agent: stakeholder-simulator }
-  retro:        { deps: [stakeholder],         critical: false, timeout_s: 120, agent: retrospective-agent }
+  retro:        { deps: [stakeholder, emit],   critical: false, timeout_s: 120, agent: retrospective-agent }
 
 # experiment-designer is intentionally NOT in the default pipeline — designing a
 # future A/B test is on-demand (/experiment), not part of explaining a past change.
 
 # Resulting tiers (informational):
 #   tier 0: profile, frame                    (parallel)
-#   tier 1: quality, semantics                (quality[profile] ‖ semantics[frame])
-#   tier 2: readiness_gate                    (Data Readiness Gate — blocks analysis on bad data)
-#   tier 3: explore
-#   tier 4: diagnose, redteam                 (parallel — red-team re-derives independently)
-#   tier 5: sizing, forecast, cohort          (parallel — enrichment; forecast/cohort conditional)
-#   tier 6: narrative
-#   tier 7: deck
-#   tier 8: stakeholder
-#   tier 9: retro
+#   tier 1: quality                           (detect -> repair -> clean layer)
+#   tier 2: semantics                         (resolve metric, pick playbook, bind columns)
+#   tier 3: readiness_gate                    (Data Readiness Gate — blocks analysis on bad data)
+#   tier 4: explore
+#   tier 5: model                             (optional fit; clean no-op for aggregate playbooks)
+#   tier 6: diagnose, redteam                 (parallel — red-team re-derives independently)
+#   tier 7: sizing, forecast, cohort          (parallel — enrichment; forecast/cohort conditional)
+#   tier 8: narrative
+#   tier 9: deck
+#   tier 10: emit, stakeholder                (parallel — extra exports ‖ exec-question check)
+#   tier 11: retro
 
 engine:
   max_concurrency: 3

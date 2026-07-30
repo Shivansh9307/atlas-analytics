@@ -17,15 +17,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from atlas.config import PATHS, TOLERANCES
+from atlas.config import PATHS
 from atlas.connectors.registry import Registry
 from atlas.dag import DagEngine, NodeOutcome, NodeSpec, NodeStatus
 from atlas.lib.budget import RunBudget
-from atlas.lib.decomposition import (
-    MarginDecomposition, SegmentContribution,
-    decompose_margin, additive_contribution, simpsons_check,
-)
-from atlas.lib.deck_pptx import Chart, DeckSpec, Slide, build_deck
+from atlas.lib.deck_pptx import build_deck
 from atlas.lib.gates import (
     GateStatus, gate1_profiling, gate2_semantics, gate3_redteam,
     gate4_provenance, gate5_stakeholder, gate_readiness,
@@ -35,11 +31,21 @@ from atlas.lib.profiling import profile_table, verdict_for
 from atlas.lib.provenance import ProvenanceLedger
 from atlas.lib.query_store import QueryStore
 from atlas.lib.run_state import RunState
-from atlas.lib.validation import validate_margin_finding
-from atlas.lib.sizing import Assumption, size_opportunity
+from atlas.lib.validation import grade_layers
 from atlas.lib.forecast import forecast as ts_forecast
 from atlas.connectors.base import TableRef
-from atlas.semantic import resolve_metric, MetricAmbiguity
+from atlas.playbooks import (
+    PLAYBOOK_REGISTRY, BriefFields, PlaybookBlocked, select_playbook,
+    supported_decompositions,
+)
+# Margin renderers live with the margin playbook now; re-exported here because
+# `atlas/lib/exporters.py` imports them from this module.
+from atlas.playbooks.margin import (  # noqa: F401
+    _build_deck_spec, _deser_dec, _ser_dec,
+)
+from atlas.semantic import (
+    resolve_metric, metric_from_text, known_metrics, MetricAmbiguity,
+)
 
 
 @dataclass
@@ -58,7 +64,13 @@ def new_run_id() -> str:
 
 
 def _extract_hints(question: str) -> dict:
-    """Very small NL parse: region + quarters. Anything unfound -> declared assumption."""
+    """Very small NL parse: region + quarters. Anything unfound -> declared assumption.
+
+    The metric is NOT parsed here — it is resolved against the semantic layer
+    (`metrics.yaml`) and is None when the question names no known metric, so
+    `n_semantics` can escalate. It must never default: a default silently turns an
+    unrecognised question into a gross-margin analysis that passes every gate.
+    """
     q = question.upper()
     region = next((r for r in ("EMEA", "AMER", "APAC") if r in q), "EMEA")
     quarters = re.findall(r"Q[1-4]", q)
@@ -70,12 +82,9 @@ def _extract_hints(question: str) -> dict:
         p1, p2 = f"Q{max(1, idx-1)}", quarters[0]
     else:
         p1, p2 = "Q1", "Q2"
-    metric = "gross_margin"  # keyword resolution below refines
-    for kw in ("margin", "revenue", "cogs", "cost"):
-        if kw in question.lower():
-            metric = "cogs" if kw == "cost" else ("gross_margin" if kw == "margin" else kw)
-            break
-    return {"region": region, "p1": p1, "p2": p2, "metric": metric}
+    mdef = metric_from_text(question)
+    return {"region": region, "p1": p1, "p2": p2,
+            "metric": mdef.name if mdef else None}
 
 
 # --------------------- run context + DAG nodes ---------------------
@@ -91,7 +100,7 @@ class RunContext:
     region: str
     p1: str
     p2: str
-    metric: str
+    metric: str | None          # None => question named no metric in metrics.yaml
     con: object
     store: QueryStore
     ledger: ProvenanceLedger
@@ -99,6 +108,11 @@ class RunContext:
     gates: dict = field(default_factory=dict)
     artefacts: list = field(default_factory=list)
     scratch: dict = field(default_factory=dict)
+    # Which analysis shape is running, and how its declared column roles resolved.
+    playbook: object | None = None
+    binding: object | None = None
+    bind_overrides: dict = field(default_factory=dict)
+    hints: dict = field(default_factory=dict)
 
     def write(self, rel: str, text: str) -> str:
         p = self.run_dir / rel
@@ -108,37 +122,58 @@ class RunContext:
             self.artefacts.append(rel)
         return rel
 
+    def analysis_table(self) -> str:
+        """The table analysis should read: the clean layer if the copilot built one.
 
-# The pipeline DAG. Mirrors .claude/agents/registry.yaml. Deps encode the waves;
-# `diagnose` and `redteam` run in parallel after `explore` (red-team ‖ narrative).
+        Reads whatever is present rather than depending on node ordering, so it is
+        safe to call before `quality` has run (it simply returns the raw table).
+        """
+        c = self.scratch.get("copilot") or {}
+        return c.get("clean_table") or self.table
+
+
+# The pipeline DAG. Mirrors .claude/agents/registry.yaml — EDIT BOTH TOGETHER.
+# Deps encode the waves; `diagnose` and `redteam` run in parallel after `model`.
+#
+# `model` and `emit` are present for every playbook and default to clean no-ops, so
+# the DAG shape does not vary by playbook (which would make the registry.yaml mirror
+# unverifiable and break resume across a playbook change).
+#
+# `timeout_s` is stated on every node. It used to be declared only in registry.yaml
+# and dropped on the floor here, so every node silently ran at the 300s NodeSpec
+# default — `readiness_gate` claimed 60s and got 300s. The documented budget is now
+# the enforced one, and `tests/test_registry_drift.py` keeps the two in step.
 SPECS = [
-    NodeSpec("profile", deps=[], critical=True),
-    NodeSpec("frame", deps=[], critical=True),
-    NodeSpec("semantics", deps=["frame"], critical=True),
+    NodeSpec("profile", deps=[], critical=True, timeout_s=120),
+    NodeSpec("frame", deps=[], critical=True, timeout_s=120),
+    # Depends on `quality` so column binding resolves against the clean layer
+    # deterministically rather than racing it. Binding here (not in `explore`) also
+    # means an unbindable table blocks before a single exploration query is spent.
+    NodeSpec("semantics", deps=["frame", "quality"], critical=True, timeout_s=120),
     # Data Quality Copilot: detect -> score -> plan/preview -> auto-repair to a
     # semantic clean layer -> Data Readiness Gate. Runs before any analysis.
-    NodeSpec("quality", deps=["profile"], critical=True),
-    NodeSpec("readiness_gate", deps=["quality", "semantics"], critical=True),
-    NodeSpec("explore", deps=["profile", "semantics", "readiness_gate"], critical=True),
-    NodeSpec("diagnose", deps=["explore"], critical=True),
-    NodeSpec("redteam", deps=["explore"], critical=True),
-    NodeSpec("sizing", deps=["diagnose"], critical=True),
-    NodeSpec("forecast", deps=["diagnose"], critical=False),   # conditional enrichment
-    NodeSpec("cohort", deps=["diagnose"], critical=False),     # conditional enrichment
-    NodeSpec("narrative", deps=["sizing"], critical=True),
-    NodeSpec("deck", deps=["narrative", "redteam"], critical=True),
-    NodeSpec("stakeholder", deps=["deck"], critical=False),
-    NodeSpec("retro", deps=["stakeholder"], critical=False),
+    NodeSpec("quality", deps=["profile"], critical=True, timeout_s=180),
+    NodeSpec("readiness_gate", deps=["quality", "semantics"], critical=True,
+             timeout_s=60),
+    NodeSpec("explore", deps=["profile", "semantics", "readiness_gate"], critical=True,
+             timeout_s=240),
+    # Fitting step. 600s because a model fit over a large table must not race the
+    # 300s engine default; the engine's single retry is safe because fits are seeded.
+    NodeSpec("model", deps=["explore"], critical=True, timeout_s=600),
+    NodeSpec("diagnose", deps=["explore", "model"], critical=True, timeout_s=240),
+    NodeSpec("redteam", deps=["explore", "model"], critical=True, timeout_s=240),
+    NodeSpec("sizing", deps=["diagnose"], critical=True, timeout_s=120),
+    NodeSpec("forecast", deps=["diagnose"], critical=False, timeout_s=120),
+    NodeSpec("cohort", deps=["diagnose"], critical=False, timeout_s=120),
+    NodeSpec("narrative", deps=["sizing"], critical=True, timeout_s=180),
+    NodeSpec("deck", deps=["narrative", "redteam"], critical=True, timeout_s=180),
+    # Non-critical on purpose: rule 4 ("fail loudly") is about not shipping a
+    # degraded deck over bad data, not about export plumbing. An exporter failing
+    # after GATE 3/4 already passed must not destroy an otherwise-validated run.
+    NodeSpec("emit", deps=["deck"], critical=False, timeout_s=300),
+    NodeSpec("stakeholder", deps=["deck"], critical=False, timeout_s=120),
+    NodeSpec("retro", deps=["stakeholder", "emit"], critical=False, timeout_s=120),
 ]
-
-
-def _emea_rows(ctx: RunContext, quarter: str):
-    r = ctx.con.run(
-        f"SELECT {ctx.dim}, segment, revenue, cogs FROM {ctx.table} "
-        f"WHERE region = '{ctx.region}' AND quarter = '{quarter}'"
-    )
-    ctx.budget.charge_query(r.bytes_scanned)
-    return r
 
 
 def n_profile(ctx: RunContext) -> NodeOutcome:
@@ -153,31 +188,108 @@ def n_profile(ctx: RunContext) -> NodeOutcome:
 
 
 def n_frame(ctx: RunContext) -> NodeOutcome:
+    # The metric was inferred from the question against metrics.yaml, not named by the
+    # user — so it is an assumption and gets declared, per the constitution.
+    metric_note = (
+        f"Metric inferred from the question as '{ctx.metric}' (locked definition in "
+        f"metrics.yaml)." if ctx.metric else
+        "No known metric matched the question — semantics will escalate."
+    )
     assumptions = [
-        "'Margin' interpreted as gross margin = (revenue - cogs)/revenue.",
+        metric_note,
         f"Comparison window: {ctx.p2} vs {ctx.p1}, {ctx.region} only.",
         f"Grain: {ctx.dim}. Numbers are full-scan (no sampling on this local source).",
     ]
     ctx.scratch["assumptions"] = assumptions
-    return NodeOutcome(output={"assumptions": assumptions})
+
+    # Classify the question. Until now this ran only as advisory prose in /route and
+    # /cao, never inside a run; recording it here makes the level part of the run's
+    # own record and lets playbook selection use it as a tiebreak.
+    routing = _classify(ctx.question)
+    ctx.scratch["routing"] = routing
+    return NodeOutcome(output={"assumptions": assumptions, "routing": routing})
+
+
+def _classify(question: str) -> dict:
+    """L1-L5 routing as a plain dict. Advisory: it never overrides an explicit pin."""
+    try:
+        from atlas.lib.router import classify
+        r = classify(question)
+        return {"level": r.level, "label": r.label, "command": r.command,
+                "reason": r.reason, "confidence": r.confidence}
+    except Exception:
+        return {}
 
 
 def n_semantics(ctx: RunContext) -> NodeOutcome:
+    """Resolve the metric, then check the engine can actually execute it.
+
+    Two distinct failure modes, deliberately not conflated:
+      * unresolvable  -> GATE 2 FAIL (metric_ambiguity -> semantic-architect)
+      * resolved but unsupported -> GATE 2 PASSES, run BLOCKS on capability
+    """
     assumptions = ctx.scratch["assumptions"]
+
+    # 1. The question named no metric this warehouse has a locked definition for.
+    if ctx.metric is None:
+        marker = "<no known metric named in the question>"
+        g2 = gate2_semantics([marker])
+        _record_gate(ctx, g2)
+        note = (f"No metric in metrics.yaml matches this question. Known: "
+                f"{sorted(known_metrics())}. Name the metric explicitly, or lock a "
+                f"new definition — Atlas escalates rather than guessing.")
+        ctx.write("brief.md", _render_brief(ctx, assumptions, note))
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 2: {note}")
+
     try:
         mdef = resolve_metric(ctx.metric)
     except MetricAmbiguity as e:
         g2 = gate2_semantics([ctx.metric])
-        ctx.gates[g2.gate] = g2.status.value
-        ctx.write("brief.md", _render_brief(
-            ctx.question, ctx.decision_owner, ctx.region, ctx.p1, ctx.p2, assumptions, str(e)))
+        _record_gate(ctx, g2)
+        ctx.write("brief.md", _render_brief(ctx, assumptions, str(e)))
         return NodeOutcome(NodeStatus.BLOCKED, f"GATE 2: {e}")
+
+    # Resolution succeeded — GATE 2 is genuinely satisfied either way.
     g2 = gate2_semantics([])
-    ctx.gates[g2.gate] = g2.status.value
+    _record_gate(ctx, g2)
+
+    # 2. Locked definition exists, but no registered playbook can compute it.
+    pb = select_playbook(metric_decomposition=mdef.decomposition,
+                         explicit=ctx.scratch.get("explicit_playbook"),
+                         question=ctx.question)
+    if pb is None:
+        ctx.write("brief.md", _render_brief(
+            ctx, assumptions,
+            f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit}); "
+            f"decomposition={mdef.decomposition}."))
+        return NodeOutcome(NodeStatus.BLOCKED, (
+            f"no execution path for metric '{mdef.name}': it declares "
+            f"decomposition='{mdef.decomposition}', and this engine implements only "
+            f"{sorted(supported_decompositions())}. The definition is valid — the "
+            f"pipeline cannot compute it. Atlas will not substitute a different metric."))
+
+    ctx.playbook = pb
+
+    # 3. Bind the playbook's declared column roles to real columns. Doing this here
+    #    means an unbindable table blocks before any exploration query is spent, and
+    #    the brief can name the columns that were actually chosen.
+    ctx.binding = pb.bind(ctx)
+    if not ctx.binding.ok:
+        msg = ctx.binding.block_message(pb.id, ctx.scratch.get("probes", {}))
+        ctx.write("brief.md", _render_brief(ctx, assumptions, msg))
+        return NodeOutcome(NodeStatus.BLOCKED, msg)
+    # Every inferred (rather than pinned) column is an assumption — declare it.
+    if ctx.binding.notes:
+        assumptions = list(assumptions) + list(ctx.binding.notes)
+        ctx.scratch["assumptions"] = assumptions
+
     ctx.write("brief.md", _render_brief(
-        ctx.question, ctx.decision_owner, ctx.region, ctx.p1, ctx.p2, assumptions,
-        f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit})."))
-    return NodeOutcome(output={"metric": mdef.name})
+        ctx, assumptions,
+        f"Resolved metric '{mdef.name}' = {mdef.expression} (unit={mdef.unit}); "
+        f"decomposition={mdef.decomposition}; playbook='{pb.id}'."))
+    return NodeOutcome(output={"metric": mdef.name, "decomposition": mdef.decomposition,
+                               "playbook": pb.id, "binding": ctx.binding.as_dict(),
+                               "assumptions": assumptions})
 
 
 def n_quality(ctx: RunContext) -> NodeOutcome:
@@ -202,7 +314,7 @@ def n_readiness_gate(ctx: RunContext) -> NodeOutcome:
     c = ctx.scratch.get("copilot") or {}
     g = gate_readiness(bool(c.get("ready", True)), c.get("decision", "GO"),
                        [c.get("reason", "")] if c.get("reason") else [])
-    ctx.gates[g.gate] = g.status.value
+    _record_gate(ctx, g)
     if not g.passed:
         return NodeOutcome(NodeStatus.BLOCKED, f"GATE readiness: {g.summary}")
     return NodeOutcome(output={"ready": True, "decision": c.get("decision", "GO"),
@@ -210,39 +322,28 @@ def n_readiness_gate(ctx: RunContext) -> NodeOutcome:
 
 
 def n_explore(ctx: RunContext) -> NodeOutcome:
-    r1, r2 = _emea_rows(ctx, ctx.p1), _emea_rows(ctx, ctx.p2)
-    dec = decompose_margin(r1.rows, r2.rows, dim=ctx.dim)
-    add = additive_contribution(r1.rows, r2.rows, dim=ctx.dim, value_key="revenue")
-    simp = simpsons_check(r1.rows, r2.rows, dim=ctx.dim)
-    rev_p1 = sum(float(r["revenue"]) for r in r1.rows)
-    rev_p2 = sum(float(r["revenue"]) for r in r2.rows)
-    ctx.scratch.update(dec=dec, add=add, simp=simp,
-                       r1=(r1.query_hash, r1.result_hash),
-                       r2=(r2.query_hash, r2.result_hash),
-                       rev_p1=rev_p1, rev_p2=rev_p2,
-                       row_count=len(r1.rows) + len(r2.rows))
-    ctx.write("hypotheses.md", _render_hypotheses(dec, add, simp, ctx.dim, ctx.p1, ctx.p2))
-    return NodeOutcome(output={
-        "dec": _ser_dec(dec), "add": add, "simp": simp,
-        "r1": [r1.query_hash, r1.result_hash], "r2": [r2.query_hash, r2.result_hash],
-        "rev_p1": rev_p1, "rev_p2": rev_p2, "row_count": len(r1.rows) + len(r2.rows),
-    })
+    """Run the playbook's exploration SQL. Columns were bound in `semantics`."""
+    pb = _require_playbook(ctx)
+    res = pb.explore(ctx)
+    ctx.scratch["pb_result"] = res
+    ctx.write(*pb.hypotheses_doc(ctx, res))
+    return NodeOutcome(output={"playbook": pb.id, **pb.serialize(res)})
+
+
+def n_model(ctx: RunContext) -> NodeOutcome:
+    """Optional fitting step. A no-op for playbooks that only aggregate."""
+    pb = _require_playbook(ctx)
+    res = pb.model(ctx, ctx.scratch["pb_result"])
+    ctx.scratch["pb_result"] = res
+    return NodeOutcome(output={"playbook": pb.id, "fitted": res is not None})
 
 
 def n_diagnose(ctx: RunContext) -> NodeOutcome:
-    dec = ctx.scratch["dec"]
-    (q1h, r1h), (q2h, r2h) = ctx.scratch["r1"], ctx.scratch["r2"]
-    ctx.ledger.record("c_gm_p1", f"{ctx.region} {ctx.p1} gross margin", round(dec.m1 * 100, 2),
-                      q1h, r1h, evidence_tier="decomposed")
-    ctx.ledger.record("c_gm_p2", f"{ctx.region} {ctx.p2} gross margin", round(dec.m2 * 100, 2),
-                      q2h, r2h, evidence_tier="decomposed")
-    ctx.ledger.record("c_delta", f"{ctx.region} margin change {ctx.p2} vs {ctx.p1} (pts)",
-                      round(dec.delta_pts, 2), q2h, r2h, evidence_tier="decomposed")
-    ctx.ledger.record("c_mix", "Mix contribution (pts)", round(dec.mix_total * 100, 2),
-                      q2h, r2h, evidence_tier="decomposed")
-    ctx.ledger.record("c_rate", "Rate contribution (pts)", round(dec.rate_total * 100, 2),
-                      q2h, r2h, evidence_tier="decomposed")
-    ctx.write("findings.md", _render_findings(ctx.region, ctx.p1, ctx.p2, dec, ctx.scratch["simp"]))
+    pb = _require_playbook(ctx)
+    res = ctx.scratch["pb_result"]
+    for s in pb.diagnose(ctx, res):
+        _record_claim(ctx, s)
+    ctx.write(*pb.findings_doc(ctx, res))
     ctx.ledger.save(ctx.run_dir / "provenance.json")   # durable early for resume
     if "provenance.json" not in ctx.artefacts:
         ctx.artefacts.append("provenance.json")
@@ -250,80 +351,40 @@ def n_diagnose(ctx: RunContext) -> NodeOutcome:
 
 
 def n_redteam(ctx: RunContext) -> NodeOutcome:
-    dec = ctx.scratch["dec"]
-    rd = ctx.con.run(
-        f"SELECT quarter, sum(revenue) AS rev, sum(cogs) AS cogs "
-        f"FROM {ctx.table} WHERE region = '{ctx.region}' "
-        f"AND quarter IN ('{ctx.p1}','{ctx.p2}') GROUP BY quarter"
-    )
-    ctx.budget.charge_query(rd.bytes_scanned)
-    by = {row["quarter"]: (row["rev"], row["cogs"]) for row in rd.rows}
-    rd_m1 = (by[ctx.p1][0] - by[ctx.p1][1]) / by[ctx.p1][0] * 100
-    rd_m2 = (by[ctx.p2][0] - by[ctx.p2][1]) / by[ctx.p2][0] * 100
-    tol = TOLERANCES.rederivation_rel
-    ok = (abs(rd_m1 - dec.m1 * 100) <= abs(dec.m1 * 100) * tol and
-          abs(rd_m2 - dec.m2 * 100) <= abs(dec.m2 * 100) * tol)
-    attacks = []
-    if ctx.scratch["simp"]["paradox"]:
-        attacks.append("Simpson's paradox detected — aggregate hides opposite segment moves")
+    pb = _require_playbook(ctx)
+    res = ctx.scratch["pb_result"]
+    rd = pb.rederive(ctx, res)
 
-    # 4-layer validation -> advisory A-F confidence grade. Grade F is treated as a
+    # Layered validation -> advisory A-F confidence grade. Grade F is treated as a
     # surviving attack; A-E annotate confidence but never override the veto logic.
-    report = validate_margin_finding(
-        row_count=ctx.scratch.get("row_count", 1), profile_ok=True,
-        mix=dec.mix_total, rate=dec.rate_total, interaction=dec.interaction_total,
-        delta=dec.delta, m1=dec.m1, m2=dec.m2, paradox=ctx.scratch["simp"]["paradox"])
+    report = grade_layers(pb.validation_layers(ctx, res))
+    attacks = list(rd.attacks)
     if report.grade == "F":
         attacks.append(f"validation grade F: {report.as_dict()['layers']}")
 
     ctx.scratch["confidence_grade"] = report.grade
-    g3 = gate3_redteam(ok, attacks)
-    ctx.gates[g3.gate] = g3.status.value
-    ctx.write("validation.md", _render_validation(
-        ctx.region, ctx.p1, ctx.p2, dec, rd_m1, rd_m2, ok, tol, attacks) +
-        f"\n\n## Confidence grade\n**{report.grade}** (score {report.score:.2f})\n" +
-        "\n".join(f"- L:{l['layer']} {'PASS' if l['passed'] else 'FAIL'} — {l['detail']}"
-                  for l in report.as_dict()["layers"]) + "\n")
+    g3 = gate3_redteam(rd.ok, attacks)
+    _record_gate(ctx, g3)
+    ctx.write(*pb.validation_doc(ctx, res, rd, report))
     if not g3.passed:
         return NodeOutcome(NodeStatus.BLOCKED, f"GATE 3: red-team veto ({g3.summary})")
-    return NodeOutcome(output={"rederivation_ok": ok, "rd_m1": rd_m1, "rd_m2": rd_m2,
+    return NodeOutcome(output={"rederivation_ok": rd.ok,
+                               "comparisons": rd.comparisons,
                                "confidence_grade": report.grade})
 
 
 def n_sizing(ctx: RunContext) -> NodeOutcome:
     """Opportunity-sizer: quantify the impact of the finding + a tornado. First-class
     pipeline node — every root-cause analysis should say what it's worth."""
-    dec = ctx.scratch["dec"]
-    rev_p2 = float(ctx.scratch.get("rev_p2", 0.0))
-    recoverable_pts = abs(dec.mix_total) * 100.0     # mix-driven points, recoverable
-
-    def model(a: dict) -> float:
-        return a["recoverable_pts"] / 100.0 * a["revenue"]
-
-    assumptions = [
-        Assumption("recoverable_pts", base=recoverable_pts,
-                   low=recoverable_pts / 2, high=recoverable_pts),
-        Assumption("revenue", base=rev_p2, low=rev_p2 * 0.9, high=rev_p2 * 1.1),
-    ]
-    res = size_opportunity(assumptions, model)
-    q2h, r2h = ctx.scratch["r2"]
-    ctx.ledger.record("c_revenue_p2", f"{ctx.region} {ctx.p2} revenue", round(rev_p2, 2),
-                      q2h, r2h, evidence_tier="decomposed")
-    ctx.ledger.record("c_opportunity",
-                      f"Margin-recovery opportunity ({ctx.p2})", round(res.base, 2),
-                      q2h, r2h, evidence_tier="hypothesis")  # a sized estimate, labelled
-    ctx.scratch["sizing"] = res
-    d = res.as_dict()
-    ctx.write("sizing.md",
-              f"# Opportunity sizing\n\n"
-              f"**Base case:** recovering the mix-driven {recoverable_pts:.1f}pts on "
-              f"{ctx.region} {ctx.p2} revenue ({rev_p2:,.0f}) ≈ **{res.base:,.0f}** "
-              f"[c_opportunity].\n\n**Most sensitive to:** {d['most_sensitive_to']}.\n\n"
-              f"## Tornado\n" +
-              "\n".join(f"- {b['assumption']}: {b['low']:,.0f} … {b['high']:,.0f} "
-                        f"(swing {b['swing']:,.0f})" for b in d["tornado"]) + "\n")
-    return NodeOutcome(output={"opportunity": round(res.base, 2),
-                               "most_sensitive_to": d["most_sensitive_to"]})
+    pb = _require_playbook(ctx)
+    outcome = pb.size(ctx, ctx.scratch["pb_result"])
+    if outcome is None:
+        return NodeOutcome(output={"sized": False})
+    for s in outcome.claims:
+        _record_claim(ctx, s)
+    if outcome.doc:
+        ctx.write(*outcome.doc)
+    return NodeOutcome(output={"sized": True, **outcome.output})
 
 
 def n_forecast(ctx: RunContext) -> NodeOutcome:
@@ -369,20 +430,20 @@ def n_cohort(ctx: RunContext) -> NodeOutcome:
 
 
 def n_narrative(ctx: RunContext) -> NodeOutcome:
-    ctx.write("narrative.md", _render_narrative(
-        ctx.region, ctx.p1, ctx.p2, ctx.scratch["dec"], ctx.decision_owner))
+    pb = _require_playbook(ctx)
+    ctx.write("narrative.md", pb.narrate(ctx, ctx.scratch["pb_result"]))
     return NodeOutcome()
 
 
 def n_deck(ctx: RunContext) -> NodeOutcome:
-    dec = ctx.scratch["dec"]
-    spec = _build_deck_spec(ctx.region, ctx.p1, ctx.p2, dec, ctx.scratch["add"],
-                            ctx.decision_owner, ctx.scratch["assumptions"], ctx.ledger)
+    pb = _require_playbook(ctx)
+    spec = pb.deck_spec(ctx, ctx.scratch["pb_result"])
     orphans = ctx.ledger.orphans(spec.referenced_claim_ids())
-    g4 = gate4_provenance(orphans)
-    ctx.gates[g4.gate] = g4.status.value
+    unfingerprinted = _unfingerprinted_derived_claims(ctx)
+    g4 = gate4_provenance(orphans, unfingerprinted)
+    _record_gate(ctx, g4)
     if not g4.passed:
-        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 4: {len(orphans)} orphan number(s)")
+        return NodeOutcome(NodeStatus.BLOCKED, f"GATE 4: {g4.summary}")
     build_deck(spec, ctx.run_dir / "deck.pptx", ctx.run_dir / "speaker_notes.md")
     for a in ("deck.pptx", "speaker_notes.md"):
         if a not in ctx.artefacts:
@@ -391,11 +452,48 @@ def n_deck(ctx: RunContext) -> NodeOutcome:
     return NodeOutcome()
 
 
+def n_emit(ctx: RunContext) -> NodeOutcome:
+    """Playbook-declared extra exports (risk scores, Power BI project, ...).
+
+    Non-critical by design — see the SPECS comment. A failure degrades the run
+    rather than discarding an already-validated deck.
+    """
+    pb = _require_playbook(ctx)
+    ids = pb.exports(ctx, ctx.scratch.get("pb_result"))
+    if not ids:
+        return NodeOutcome(output={"exports": []})
+    written: list[str] = []
+    for eid in ids:
+        written += _run_exporter(ctx, eid)
+    for w in written:
+        if w not in ctx.artefacts:
+            ctx.artefacts.append(w)
+    return NodeOutcome(output={"exports": written})
+
+
+def _run_exporter(ctx: RunContext, exporter_id: str) -> list[str]:
+    """Resolve and run one exporter against the live run context."""
+    import atlas.exporters  # noqa: F401  (registers the built-ins)
+    from atlas.lib.export_registry import ExportContext, get_exporter
+
+    exporter = get_exporter(exporter_id)          # raises on an unknown id
+    ectx = ExportContext(
+        run_id=ctx.run_id, run_dir=ctx.run_dir, ledger=ctx.ledger,
+        spec=ctx.scratch.get("spec"), playbook_id=getattr(ctx.playbook, "id", ""),
+        result=ctx.scratch.get("pb_result"), binding=ctx.binding, con=ctx.con,
+        options={"dax_table": ctx.analysis_table()})
+    ok, why = exporter.available(ectx)
+    if not ok:
+        raise PlaybookBlocked(why)
+    return exporter.emit(ectx)
+
+
 def n_stakeholder(ctx: RunContext) -> NodeOutcome:
-    spec = ctx.scratch["spec"]
-    unanswered = _stakeholder_check(spec, ctx.scratch["dec"], ctx.scratch["simp"])
+    pb = _require_playbook(ctx)
+    checks = pb.stakeholder_questions(ctx, ctx.scratch["pb_result"], ctx.scratch["spec"])
+    unanswered = [q for q, ok in checks.items() if not ok]
     g5 = gate5_stakeholder(unanswered)
-    ctx.gates[g5.gate] = g5.status.value
+    _record_gate(ctx, g5)
     return NodeOutcome(output={"unanswered": unanswered})
 
 
@@ -457,7 +555,7 @@ def _archive_headline_queries(ctx: RunContext) -> None:
             if meta and meta.get("sql"):
                 query_archive.archive(
                     meta["sql"], source=ctx.source, dialect=ctx.con.dialect,
-                    metric=ctx.metric, intent_tags=tags, result_hash=rh,
+                    metric=ctx.metric or "unresolved", intent_tags=tags, result_hash=rh,
                     run_id=ctx.run_id, notes="validated headline query")
     except Exception:
         pass  # archiving is best-effort; never break a completed run
@@ -466,29 +564,70 @@ def _archive_headline_queries(ctx: RunContext) -> None:
 NODE_FNS = {
     "profile": n_profile, "frame": n_frame, "semantics": n_semantics,
     "quality": n_quality, "readiness_gate": n_readiness_gate,
-    "explore": n_explore, "diagnose": n_diagnose, "redteam": n_redteam,
-    "sizing": n_sizing, "forecast": n_forecast, "cohort": n_cohort,
-    "narrative": n_narrative, "deck": n_deck, "stakeholder": n_stakeholder,
-    "retro": n_retro,
+    "explore": n_explore, "model": n_model, "diagnose": n_diagnose,
+    "redteam": n_redteam, "sizing": n_sizing, "forecast": n_forecast,
+    "cohort": n_cohort, "narrative": n_narrative, "deck": n_deck,
+    "emit": n_emit, "stakeholder": n_stakeholder, "retro": n_retro,
 }
 
 
-def _ser_dec(dec: MarginDecomposition) -> dict:
-    return {
-        "m1": dec.m1, "m2": dec.m2, "delta": dec.delta,
-        "mix_total": dec.mix_total, "rate_total": dec.rate_total,
-        "interaction_total": dec.interaction_total,
-        "segments": [{"key": s.key, "mix": s.mix, "rate": s.rate,
-                      "interaction": s.interaction, "w1": s.w1, "w2": s.w2,
-                      "m1": s.m1, "m2": s.m2} for s in dec.segments],
-    }
+def _record_gate(ctx: RunContext, g) -> bool:
+    """Record a gate's status, remembering the first failure so BLOCKED.md can name
+    the agent that owns each defect. Returns whether it passed."""
+    ctx.gates[g.gate] = g.status.value
+    if not g.passed and "failed_gate" not in ctx.scratch:
+        ctx.scratch["failed_gate"] = g
+    return g.passed
 
 
-def _deser_dec(d: dict) -> MarginDecomposition:
-    segs = [SegmentContribution(**s) for s in d["segments"]]
-    return MarginDecomposition(
-        m1=d["m1"], m2=d["m2"], delta=d["delta"], mix_total=d["mix_total"],
-        rate_total=d["rate_total"], interaction_total=d["interaction_total"], segments=segs)
+def _require_playbook(ctx: RunContext):
+    """Every analysis node needs a selected playbook; its absence is a wiring bug."""
+    if ctx.playbook is None:
+        raise PlaybookBlocked(
+            "no playbook selected — `semantics` must run (or be rehydrated) first")
+    return ctx.playbook
+
+
+def _record_claim(ctx: RunContext, s) -> None:
+    """Write one ClaimSpec to the ledger.
+
+    Centralised here rather than in each playbook so provenance enforcement has a
+    single choke point. A spec carrying a `derivation` goes through the stricter
+    `record_derived()`, which requires a real parent query and refuses any evidence
+    tier above `correlational`.
+    """
+    if getattr(s, "derivation", ""):
+        ctx.ledger.record_derived(
+            s.claim_id, s.text, s.value,
+            parent_query_hash=s.query_hash, parent_result_hash=s.result_hash,
+            derivation_hash=s.derivation.split(":", 1)[-1],
+            derivation_label=s.derivation, evidence_tier=s.evidence_tier,
+            parent_claims=list(getattr(s, "parent_claims", []) or []), notes=s.notes)
+        return
+    ctx.ledger.record(s.claim_id, s.text, s.value, s.query_hash, s.result_hash,
+                      evidence_tier=s.evidence_tier, notes=s.notes)
+
+
+def _unfingerprinted_derived_claims(ctx: RunContext) -> list[str]:
+    """Derived claims whose recipe was never written to runs/<id>/model/.
+
+    A number computed by a recipe nobody can find is exactly as unsourced as an
+    invented one, so GATE 4 treats it the same way.
+
+    Early-returns before importing `model_provenance` when there is nothing derived
+    to check — most playbooks (margin, descriptive) never produce a derived claim at
+    all, so there is no reason for every deck build to pay for that import.
+    """
+    derived = ctx.ledger.derived()
+    if not derived:
+        return []
+    from atlas.lib.model_provenance import fingerprint_exists
+    out = []
+    for c in derived:
+        digest = c.derivation.split(":", 1)[-1]
+        if not digest or not fingerprint_exists(ctx.run_dir, digest):
+            out.append(c.claim_id)
+    return out
 
 
 def _hydrate(ctx: RunContext, completed: dict) -> None:
@@ -497,13 +636,30 @@ def _hydrate(ctx: RunContext, completed: dict) -> None:
         ctx.scratch["assumptions"] = completed["frame"].get("assumptions", [])
     if "quality" in completed:
         ctx.scratch["copilot"] = completed["quality"]
-    if "explore" in completed:
-        e = completed["explore"]
-        ctx.scratch.update(
-            dec=_deser_dec(e["dec"]), add=e["add"], simp=e["simp"],
-            r1=tuple(e["r1"]), r2=tuple(e["r2"]),
-            rev_p1=e.get("rev_p1", 0.0), rev_p2=e.get("rev_p2", 0.0),
-            row_count=e.get("row_count", 1))
+
+    # Pin the playbook by the id recorded at the time, never re-select. A resumed
+    # run must not silently switch analysis shape because metrics.yaml changed.
+    sem = completed.get("semantics") or {}
+    pb_id = sem.get("playbook") or (completed.get("explore") or {}).get("playbook")
+    if pb_id:
+        ctx.playbook = PLAYBOOK_REGISTRY.get(pb_id)
+    if sem.get("binding"):
+        from atlas.playbooks.binding import ColumnBinding
+        ctx.binding = ColumnBinding.from_dict(sem["binding"])
+    if sem.get("assumptions"):
+        ctx.scratch["assumptions"] = list(sem["assumptions"])
+
+    explore = completed.get("explore")
+    if explore and ctx.playbook is not None:
+        body = {k: v for k, v in explore.items() if k != "playbook"}
+        res = ctx.playbook.deserialize(body)
+        ctx.scratch["pb_result"] = res
+        # Some playbooks mirror their result into legacy scratch keys that
+        # orchestrator-level helpers read directly; let them re-populate.
+        stash = getattr(ctx.playbook, "_stash", None)
+        if stash is not None:
+            stash(ctx, res)
+
     for opt in ("forecast", "cohort"):
         if opt in completed:
             ctx.scratch[opt] = completed[opt]
@@ -521,7 +677,15 @@ def run_analysis(
     runs_root: Path | None = None,
     decision_owner: str = "VP Finance, EMEA",
     resume_run_id: str | None = None,
+    playbook: str | None = None,
+    bind: dict[str, str] | None = None,
 ) -> RunResult:
+    """Run the pipeline.
+
+    `playbook` pins the analysis shape explicitly (otherwise it is selected from the
+    resolved metric's `decomposition:`). `bind` pins column roles, e.g.
+    `bind={"target": "Churn"}`, overriding inference.
+    """
     runs_root = runs_root or PATHS.runs
 
     if resume_run_id:
@@ -543,7 +707,10 @@ def run_analysis(
         dim=dim, decision_owner=decision_owner, region=hints["region"],
         p1=hints["p1"], p2=hints["p2"], metric=hints["metric"], con=con, store=store,
         ledger=ProvenanceLedger(run_id), budget=RunBudget(), gates=dict(state.gates),
+        bind_overrides=dict(bind or {}), hints=hints,
     )
+    if playbook:
+        ctx.scratch["explicit_playbook"] = playbook
 
     completed = state.completed_outputs() if resume_run_id else {}
     _hydrate(ctx, completed)
@@ -566,17 +733,17 @@ def run_analysis(
     state.reason = result.reason
 
     if result.status == "COMPLETE":
-        dec = ctx.scratch["dec"]
-        headline = (f"{ctx.region} gross margin fell {abs(dec.delta_pts):.1f}pts "
-                    f"({dec.m1*100:.1f}% -> {dec.m2*100:.1f}%), "
-                    f"driven by {dec.dominant_effect()}.")
+        headline = _headline(ctx)
         state.headline = headline
         state.save(runs_root)
         return RunResult(run_id, run_dir, "COMPLETE", gates=ctx.gates,
                          headline=headline, artefacts=ctx.artefacts)
 
     if result.status == "BLOCKED":
-        _blocked(run_id, run_dir, ctx.gates, result.reason, ctx.ledger)
+        from atlas.lib.gates import routing_note
+        failed = ctx.scratch.get("failed_gate")
+        _blocked(run_id, run_dir, ctx.gates, result.reason, ctx.ledger,
+                 owners=routing_note(failed) if failed is not None else "")
         state.save(runs_root)
         return RunResult(run_id, run_dir, "BLOCKED", blocked_reason=result.reason,
                          gates=ctx.gates, artefacts=ctx.artefacts + ["BLOCKED.md"])
@@ -591,10 +758,11 @@ def run_analysis(
 
 
 # --------------------- rendering helpers ---------------------
-def _blocked(run_id, run_dir, gates, reason, ledger=None):
+def _blocked(run_id, run_dir, gates, reason, ledger=None, owners=""):
     (run_dir / "BLOCKED.md").write_text(
         f"# Run {run_id} BLOCKED\n\n**Reason:** {reason}\n\n"
         f"## Gates\n" + "\n".join(f"- {k}: {v}" for k, v in gates.items()) +
+        owners +
         "\n\n## What Atlas needs\nResolve the blocking condition above, then re-run. "
         "Atlas does not emit a degraded deck.\n"
     )
@@ -659,200 +827,45 @@ def _render_profile(source, report, verdict):
     return "\n".join(lines)
 
 
-def _render_brief(question, owner, region, p1, p2, assumptions, semantic_note):
+def _headline(ctx: RunContext) -> str:
+    """One-sentence answer. Playbooks that define `headline()` own their phrasing."""
+    pb = ctx.playbook
+    res = ctx.scratch.get("pb_result")
+    fn = getattr(pb, "headline", None) if pb is not None else None
+    if fn is not None and res is not None:
+        return fn(ctx, res)
+    return f"{ctx.question} — see findings.md."
+
+
+def _brief_fields(ctx: RunContext) -> BriefFields:
+    """Per-playbook framing, with a neutral fallback for a run that blocked before
+    a playbook could be selected (an unresolvable metric)."""
+    if ctx.playbook is not None:
+        return ctx.playbook.brief_fields(ctx)
+    return BriefFields(
+        decision_unblocked=f"Pending metric resolution for: {ctx.question}",
+        primary_metric=ctx.metric or "unresolved",
+        comparison_window=f"{ctx.p2} vs {ctx.p1}",
+        grain=ctx.dim,
+    )
+
+
+def _render_brief(ctx: RunContext, assumptions, semantic_note):
+    f = _brief_fields(ctx)
     return (
         f"# Brief\n\n"
-        f"**Question:** {question}\n\n"
-        f"**Decision owner:** {owner}\n\n"
-        f"**Decision unblocked:** Whether/how to intervene on {region} margin.\n\n"
-        f"**Primary metric:** gross margin (ratio).\n\n"
-        f"**Comparison window:** {p2} vs {p1}.\n\n"
-        f"**Grain:** product_line x segment, {region}.\n\n"
-        f"**Success criteria:** A ranked, decomposed, provenance-stamped cause.\n\n"
-        f"**Non-goals:** Other regions; forecasting; pricing strategy build-out.\n\n"
+        f"**Question:** {ctx.question}\n\n"
+        f"**Decision owner:** {ctx.decision_owner}\n\n"
+        f"**Decision unblocked:** {f.decision_unblocked}\n\n"
+        f"**Primary metric:** {f.primary_metric}.\n\n"
+        f"**Comparison window:** {f.comparison_window}.\n\n"
+        f"**Grain:** {f.grain}.\n\n"
+        f"**Success criteria:** {f.success_criteria}\n\n"
+        f"**Non-goals:** {f.non_goals}\n\n"
         f"## Semantic resolution\n{semantic_note}\n\n"
         f"## Assumptions (declared, not buried)\n" +
         "\n".join(f"- {a}" for a in assumptions) + "\n"
     )
-
-
-def _render_hypotheses(dec, add, simp, dim, p1, p2):
-    seg_lines = "\n".join(
-        f"- **{s.key}**: total {s.total*100:+.2f}pts (mix {s.mix*100:+.2f}, "
-        f"rate {s.rate*100:+.2f}, interaction {s.interaction*100:+.2f})"
-        for s in dec.segments
-    )
-    add_lines = "\n".join(
-        f"- **{a['key']}** revenue {a['contribution']:+,.0f}" for a in add
-    )
-    return (
-        f"# Hypotheses & exploration ({p2} vs {p1})\n\n"
-        f"## H1 — Mix vs rate (grain: {dim})\n"
-        f"Margin change {dec.delta_pts:+.2f}pts = mix {dec.mix_total*100:+.2f} + "
-        f"rate {dec.rate_total*100:+.2f} + interaction {dec.interaction_total*100:+.2f}.\n"
-        f"Dominant effect: **{dec.dominant_effect()}**.\n\n{seg_lines}\n\n"
-        f"## H2 — Revenue mix shift\n{add_lines}\n\n"
-        f"## H3 — Simpson's paradox check\n"
-        f"paradox={simp['paradox']}; aggregate {simp['aggregate_delta_pts']:+.2f}pts; "
-        f"segment deltas {simp['segment_deltas_pts']}.\n"
-    )
-
-
-def _render_findings(region, p1, p2, dec, simp):
-    return (
-        f"# Findings\n\n"
-        f"**Headline (evidence tier: decomposed):** {region} gross margin fell "
-        f"{abs(dec.delta_pts):.1f}pts, from {dec.m1*100:.1f}% ({p1}) to "
-        f"{dec.m2*100:.1f}% ({p2}).\n\n"
-        f"**Root cause (decomposed):** The drop is a **{dec.dominant_effect()}** effect. "
-        f"Mix contributed {dec.mix_total*100:+.2f}pts; within-segment rate contributed "
-        f"{dec.rate_total*100:+.2f}pts; interaction {dec.interaction_total*100:+.2f}pts.\n\n"
-        f"**Ranked drivers:**\n" +
-        "\n".join(f"{i+1}. {s.key}: {s.total*100:+.2f}pts" for i, s in enumerate(dec.segments)) +
-        f"\n\n**Simpson check:** {'PARADOX FLAGGED' if simp['paradox'] else 'no paradox'}.\n"
-    )
-
-
-def _render_validation(region, p1, p2, dec, rd_m1, rd_m2, ok, tol, attacks):
-    return (
-        f"# Validation (red-team)\n\n"
-        f"## Independent re-derivation\n"
-        f"Re-derived from raw sums via a separate query (analyst SQL not seen):\n"
-        f"- {p1}: {rd_m1:.2f}% vs analyst {dec.m1*100:.2f}%\n"
-        f"- {p2}: {rd_m2:.2f}% vs analyst {dec.m2*100:.2f}%\n"
-        f"- Tolerance: ±{tol*100:.2f}% relative -> **{'WITHIN' if ok else 'OUTSIDE'}**\n\n"
-        f"## Attacks\n" + ("\n".join(f"- SURVIVING: {a}" for a in attacks) or "- none survived") +
-        f"\n\n## Verdict\n**{'PASS' if ok and not attacks else 'FAIL'}**\n"
-    )
-
-
-def _render_narrative(region, p1, p2, dec, owner):
-    return (
-        f"# Narrative — for {owner}\n\n"
-        f"## Answer (one sentence)\n"
-        f"{region} gross margin fell {abs(dec.delta_pts):.1f} points because revenue mix "
-        f"shifted toward lower-margin lines — not because any product got less profitable "
-        f"[c_delta, c_mix].\n\n"
-        f"## Why (three pillars)\n"
-        f"1. **The fall is real and precise:** {dec.m1*100:.1f}% -> {dec.m2*100:.1f}% "
-        f"({dec.delta_pts:+.1f}pts) [c_gm_p1, c_gm_p2].\n"
-        f"2. **It is a mix shift:** mix explains {dec.mix_total*100:+.1f}pts; rate only "
-        f"{dec.rate_total*100:+.1f}pts [c_mix, c_rate].\n"
-        f"3. **No product became less profitable:** within-line margins are essentially flat.\n\n"
-        f"## So what\n"
-        f"Margin is defensible: rebalance mix rather than chase cost.\n"
-    )
-
-
-def _build_deck_spec(region, p1, p2, dec, add, owner, assumptions, ledger) -> DeckSpec:
-    seg = dec.segments
-    slides = [
-            Slide("insight",
-                  f"Gross margin dropped from {dec.m1*100:.1f}% to {dec.m2*100:.1f}% "
-                  f"— a {abs(dec.delta_pts):.1f}pt fall",
-                  bullets=[f"{p1}: {dec.m1*100:.1f}%", f"{p2}: {dec.m2*100:.1f}%",
-                           "Within-line margins essentially unchanged"],
-                  chart=Chart("column", [p1, p2],
-                              {"Gross margin %": [round(dec.m1*100, 2), round(dec.m2*100, 2)]},
-                              title=f"{region} gross margin"),
-                  speaker_notes=(
-                      f"The headline is a {abs(dec.delta_pts):.1f} point drop in {region} gross "
-                      f"margin, from {dec.m1*100:.1f} to {dec.m2*100:.1f} percent. Hold on that "
-                      f"number: it is exact and independently re-derived. What matters next is "
-                      f"that no product line actually got less profitable — so this is a mix "
-                      f"story, which we will show on the next slide."),
-                  claim_ids=["c_gm_p1", "c_gm_p2", "c_delta"]),
-            Slide("evidence",
-                  "The entire drop is a mix shift, not a rate collapse",
-                  bullets=[f"Mix: {dec.mix_total*100:+.1f}pts",
-                           f"Rate: {dec.rate_total*100:+.1f}pts",
-                           f"Interaction: {dec.interaction_total*100:+.1f}pts"],
-                  chart=Chart("bar", ["Mix", "Rate", "Interaction"],
-                              {"Contribution (pts)": [round(dec.mix_total*100, 2),
-                                                      round(dec.rate_total*100, 2),
-                                                      round(dec.interaction_total*100, 2)]}),
-                  speaker_notes=(
-                      f"Decomposing the change exactly, mix contributes {dec.mix_total*100:+.1f} "
-                      f"points while rate contributes only {dec.rate_total*100:+.1f}. The identity "
-                      f"is exact — mix plus rate plus interaction equals the total change. In plain "
-                      f"terms: we sold a lower-margin blend, we did not get worse at any single "
-                      f"product. That distinction changes the fix entirely."),
-                  claim_ids=["c_mix", "c_rate", "c_delta"]),
-            Slide("sowhat",
-                  "This is a defensible, mix-driven move — cost-cutting would miss it",
-                  bullets=[f"Top driver: {seg[0].key} ({seg[0].total*100:+.1f}pts)",
-                           "Rate levers (procurement, pricing) would not have caught this"],
-                  speaker_notes=(
-                      f"So what does this mean for you? Because the driver is {seg[0].key} mix "
-                      f"and not unit economics, the right response is commercial — steering the "
-                      f"sales blend — rather than a cost programme. A procurement or pricing push "
-                      f"would spend effort against the wrong cause."),
-                  claim_ids=["c_mix"]),
-            Slide("recommendation",
-                  "Rebalance the EMEA product mix to recover the 4 points",
-                  bullets=["Incentivise higher-margin attach in the sales motion",
-                           "Review discounting on the lower-margin line",
-                           "Track mix weekly as the leading indicator"],
-                  speaker_notes=(
-                      "The recommendation is three concrete moves: incentivise the higher-margin "
-                      "attach, review discounting on the line that grew, and instrument mix as a "
-                      "weekly leading indicator so this never surprises us again. None of these "
-                      "require a cost programme; all target the mechanism we identified."),
-                  claim_ids=[]),
-    ]
-
-    # Opportunity slide — inserted after the evidence slide when sizing produced a
-    # provenance-stamped estimate (opportunity-sizer node). Keeps the deck honest:
-    # the impact is a sized estimate (hypothesis tier), shown with its driver.
-    opp = ledger.get("c_opportunity")
-    rev = ledger.get("c_revenue_p2")
-    if opp is not None and rev is not None:
-        slides.insert(2, Slide(
-            "sowhat",
-            f"Recovering the mix drift is worth ≈ {opp.value:,.0f}",
-            bullets=[f"Mix-driven points recoverable: {abs(dec.mix_total)*100:.1f}pts",
-                     f"On {p2} revenue of {rev.value:,.0f}",
-                     "Sized estimate — see tornado in the appendix"],
-            chart=Chart("column", ["Opportunity"], {"Est. value": [round(opp.value, 2)]},
-                        title="Margin-recovery opportunity"),
-            speaker_notes=(
-                f"To put a number on it: recovering the mix-driven {abs(dec.mix_total)*100:.1f} "
-                f"points on {p2} revenue is worth roughly {opp.value:,.0f}. Treat this as a "
-                f"sized estimate, not a measured fact — the appendix shows the tornado, and it "
-                f"hinges most on how many of those points are actually recoverable."),
-            claim_ids=["c_opportunity", "c_revenue_p2"]))
-
-    return DeckSpec(
-        title=(f"{region} gross margin fell {abs(dec.delta_pts):.0f}pts because volume "
-               f"shifted to lower-margin lines"),
-        subtitle=f"{p2} vs {p1} gross-margin decomposition",
-        decision_owner=owner,
-        slides=slides,
-        assumptions=assumptions,
-        methodology=(
-            "Exact mix / rate / interaction decomposition of gross margin at product_line "
-            "grain.\nHeadline independently re-derived from raw revenue/cogs sums within "
-            "±0.5% tolerance.\nEvery number carries a provenance ID -> stored query + result hash."),
-        provenance=[
-            {"claim_id": c.claim_id, "text": c.text, "value": c.value,
-             "query_hash": c.query_hash, "tier": c.evidence_tier}
-            for c in ledger.all()
-        ],
-    )
-
-
-def _stakeholder_check(spec, dec, simp) -> list[str]:
-    """Five hardest exec questions; return any the deck+notes cannot answer."""
-    notes = " ".join(s.speaker_notes.lower() for s in spec.slides)
-    checks = {
-        "Is the number right?": "re-derived" in notes or "exact" in notes,
-        "Is it mix or rate?": "mix" in notes and "rate" in notes,
-        "Which line drives it?": any("driver" in s.title.lower() or dec.segments[0].key.lower() in notes
-                                     for s in spec.slides),
-        "Should we cut cost?": "cost" in notes,
-        "What do we do Monday?": any(s.kind == "recommendation" for s in spec.slides),
-    }
-    return [q for q, ok in checks.items() if not ok]
 
 
 def _render_retro(run_id, gates, budget):

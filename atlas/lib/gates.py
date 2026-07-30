@@ -24,6 +24,7 @@ ROUTING: dict[str, tuple[str, int]] = {
     "weak_causal_logic": ("root-cause-analyst", 2),
     "underpowered_stat": ("statistician", 2),
     "metric_ambiguity": ("semantic-architect", 1),
+    "column_binding": ("semantic-architect", 1),
     "unanswered_stakeholder_q": ("narrative-writer", 2),
     "failed_rederivation": ("sql-engineer", 2),
     "data_not_ready": ("data-quality-copilot", 2),
@@ -73,6 +74,29 @@ class ReworkTracker:
         return self._counts.get((gate, kind), 0)
 
 
+def routing_note(result: "GateResult") -> str:
+    """Who owns each defect in a failed gate, and how many attempts it gets.
+
+    Deliberately informational rather than an automatic retry loop. In the
+    deterministic engine a gate's inputs are already-computed stored values, so
+    re-running the same evaluator produces a bit-identical failure — a rework loop
+    would burn budget to reach the same conclusion and make an honest hard block look
+    intermittent. What is genuinely useful is telling whoever picks this up which
+    agent owns the fix, which is what ROUTING encodes.
+    """
+    if result.passed or not result.defects:
+        return ""
+    lines = ["", "## Who owns this", ""]
+    seen: set[tuple[str, str]] = set()
+    for d in result.defects:
+        key = (d.kind, d.owner)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- `{d.kind}` -> **{d.owner}** (rework cap {d.cap})")
+    return "\n".join(lines)
+
+
 # --- concrete gate evaluators (pure functions over already-computed inputs) ---
 
 def gate1_profiling(verdicts: dict[str, str]) -> GateResult:
@@ -109,14 +133,31 @@ def gate3_redteam(rederivation_ok: bool, surviving_attacks: list[str]) -> GateRe
     return GateResult("GATE3_redteam", GateStatus.PASS)
 
 
-def gate4_provenance(orphan_claim_ids: list[str]) -> GateResult:
-    """GATE 4: every deck number resolves in the ledger."""
-    if not orphan_claim_ids:
+def gate4_provenance(orphan_claim_ids: list[str],
+                     unfingerprinted: list[str] | None = None) -> GateResult:
+    """GATE 4: every deck number resolves in the ledger, and every model-derived
+    number has its recipe persisted.
+
+    `unfingerprinted` is defaulted so existing single-argument call sites are
+    unaffected. A derived claim whose `ModelFingerprint` was never written to disk is
+    exactly as unsourced as a fabricated one: nobody can re-derive it.
+    """
+    unfingerprinted = unfingerprinted or []
+    if not orphan_claim_ids and not unfingerprinted:
         return GateResult("GATE4_provenance", GateStatus.PASS)
     defects = [Defect("unprovenanced_number", f"claim {cid} has no ledger entry", cid)
                for cid in orphan_claim_ids]
+    defects += [Defect("unprovenanced_number",
+                       f"claim {cid} is model-derived but its fingerprint was not "
+                       f"persisted, so the number cannot be re-derived", cid)
+                for cid in unfingerprinted]
+    bits = []
+    if orphan_claim_ids:
+        bits.append(f"{len(orphan_claim_ids)} orphan number(s)")
+    if unfingerprinted:
+        bits.append(f"{len(unfingerprinted)} unfingerprinted derived number(s)")
     return GateResult("GATE4_provenance", GateStatus.FAIL, defects,
-                      summary=f"{len(orphan_claim_ids)} orphan number(s) block export")
+                      summary=" and ".join(bits) + " block export")
 
 
 def gate_readiness(ready: bool, decision: str, reasons: list[str]) -> GateResult:
