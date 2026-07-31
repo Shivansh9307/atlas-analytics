@@ -100,6 +100,7 @@ class Registry:
                 table_name=raw.get("table_name"),
                 sheet=raw.get("sheet"),
                 store=store, row_limit=raw.get("row_limit"),
+                derived_columns=raw.get("derived_columns"),
             )
 
         # Warehouse adapters are lazily imported so the [warehouse] extra is

@@ -14,6 +14,8 @@ from atlas.lib.query_store import QueryStore
 FIXTURE = ROOT / "tests" / "fixtures" / "emea_margin.csv"
 DIRTY_FIXTURE = ROOT / "tests" / "fixtures" / "dirty.xlsx"
 CHURN_FIXTURE = ROOT / "tests" / "fixtures" / "churn.csv"
+CP1252_FIXTURE = ROOT / "tests" / "fixtures" / "cp1252.csv"
+LATIN1_ONLY_FIXTURE = ROOT / "tests" / "fixtures" / "latin1_only.csv"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -25,6 +27,10 @@ def _ensure_fixture():
         subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_dirty_fixture.py")], check=True)
     if not CHURN_FIXTURE.exists():
         subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_churn_fixture.py")], check=True)
+    if not CP1252_FIXTURE.exists():
+        subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_cp1252_fixture.py")], check=True)
+    if not LATIN1_ONLY_FIXTURE.exists():
+        subprocess.run([sys.executable, str(ROOT / "tests" / "fixtures" / "make_latin1_only_fixture.py")], check=True)
 
 
 @pytest.fixture
