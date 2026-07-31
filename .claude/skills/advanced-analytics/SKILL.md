@@ -37,3 +37,12 @@ complement provenance — run them on result rows in the `sql-engineer` path.
 / Simpson — graded **A–F** (`validate_margin_finding`). Advisory: it annotates the
 red-team's verdict and a grade **F** adds a surviving attack, but it never overrides
 the Gate 3 veto. See [[validation-protocol]].
+
+## Pre-model redundancy check (`scripts/redundancy_check.py`)
+Run BEFORE the first fit of any interpretable model on a joined/star-schema source:
+`uv run python .claude/skills/advanced-analytics/scripts/redundancy_check.py --source <s>
+--target <col>` (or `--plan runs/<id>/feature_plan.json`). Four checks — functional
+determinism between encoded columns, exact duplicates, design-matrix rank via
+`atlas.lib.logit.build_design` + QR (which NAMES the dependent dummies), and a
+quasi-separation screen. Exit 1 = do not fit yet. Promotion artefact for lessons
+L-0004/L-0005/L-0006/L-0007; rationale in `memory/query_templates/pre_model_redundancy.md`.
