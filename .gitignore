@@ -33,5 +33,9 @@ memory/user_profile.json
 # os
 .DS_Store
 
+# editors — local preferences, not project config
+.vscode/
+.idea/
+
 # Data Quality Copilot: runtime semantic-clean manifests (regenerated on connect)
 clean_layers/
