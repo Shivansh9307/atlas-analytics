@@ -137,3 +137,187 @@ sources:
     table_name: fact_returns
     row_limit: 5000000
     access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  # --- LIVE: order-grain join across the star schema, for questions that need
+  # returns + product + store + customer together. Each source above lives in
+  # its own private DuckDB engine (CsvDuckDBConnector), so none of them can be
+  # JOINed in a single run() — this uses MultiCsvJoinConnector, which opens ONE
+  # connection and registers all 8 files into it before building the view below.
+  #
+  # Declared repairs/assumptions (rule 2 — not silent):
+  #   - dim_customers.csv has 50 customer_id values with an exact duplicate row
+  #     each (verified 2026-07-31: 0 conflicting versions across all 50). Deduped
+  #     with SELECT DISTINCT in the customers_dedup CTE — same fix the Data
+  #     Quality Copilot's duplicate_detection module proposes for this source.
+  #     NOTE: the copilot's auto-plan for dim_customers_csv also proposes casting
+  #     `phone` to DOUBLE (numeric_type_repair) — do NOT apply that if you ever
+  #     run /clean on dim_customers_csv directly; these are Egyptian mobile
+  #     numbers with meaningful leading zeros, not measurements.
+  #   - "Returns risk" is split by return_reason into two targets, per operator
+  #     decision: product_quality_return (Defective Product, Quality Issue) vs
+  #     non_quality_return (Duplicate Order, Wrong Item Delivered, Size Issue,
+  #     Changed Mind) — these are different business problems (product QA vs.
+  #     fulfillment/fit) and were not collapsed into one target. Counts ALL
+  #     filed returns regardless of return_status (Refunded/Pending/Rejected);
+  #     a Rejected return still reflects a customer-perceived signal.
+  #   - Product/category attribution is at ORDER grain, not order-line grain:
+  #     `fact_returns` only identifies which ORDER was returned, not which line
+  #     item within it. For the 60% of orders with >1 line item (verified
+  #     2026-07-31: 4,843/12,000 single-line), "dominant_category"/"dominant_brand"
+  #     are the category/brand of that order's highest-revenue line — an
+  #     approximation, not a fact. `is_single_line_order` flags the 4,843 orders
+  #     where this attribution is unambiguous.
+  returns_risk_orders:
+    dialect: duckdb
+    kind: joined_csv
+    table_name: returns_risk_orders
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+    sources:
+      orders_2022_2023: ./data/fact_orders_2022_2023.csv
+      orders_2024: ./data/fact_orders_2024.csv
+      order_details: ./data/fact_order_details.csv
+      returns: ./data/fact_returns.csv
+      products: ./data/dim_products.csv
+      stores: ./data/dim_stores.csv
+      customers: ./data/dim_customers.csv
+      employees: ./data/dim_employees.csv
+    view_sql: >
+      WITH orders_all AS (
+          SELECT order_id, order_date, date_id, customer_id, store_id, employee_id,
+                 payment_method, order_status, total_revenue, total_cost
+          FROM orders_2022_2023
+          UNION ALL
+          SELECT order_id, order_date, date_id, customer_id, store_id, employee_id,
+                 payment_method, order_status, total_revenue, total_cost
+          FROM orders_2024
+      ),
+      customers_dedup AS (
+          SELECT DISTINCT * FROM customers
+      ),
+      order_lines AS (
+          SELECT
+              od.order_id,
+              count(*) AS num_line_items,
+              count(DISTINCT od.product_id) AS num_distinct_products,
+              count(DISTINCT p.category) AS num_distinct_categories,
+              sum(od.quantity) AS total_quantity,
+              avg(od.discount_pct) AS avg_discount_pct,
+              arg_max(p.category, od.line_total_revenue) AS dominant_category,
+              arg_max(p.subcategory, od.line_total_revenue) AS dominant_subcategory,
+              arg_max(p.brand, od.line_total_revenue) AS dominant_brand,
+              arg_max(od.product_id, od.line_total_revenue) AS dominant_product_id
+          FROM order_details od
+          LEFT JOIN products p ON p.product_id = od.product_id
+          GROUP BY od.order_id
+      ),
+      returns_flagged AS (
+          SELECT
+              order_id, return_reason, return_status,
+              CASE WHEN return_reason IN ('Defective Product', 'Quality Issue')
+                   THEN 1 ELSE 0 END AS product_quality_return,
+              CASE WHEN return_reason IN ('Duplicate Order', 'Wrong Item Delivered',
+                                           'Size Issue', 'Changed Mind')
+                   THEN 1 ELSE 0 END AS non_quality_return
+          FROM returns
+      )
+      SELECT
+          o.order_id, o.order_date, year(o.order_date) AS order_year,
+          upper(trim(o.payment_method)) AS payment_method,
+          o.order_status, o.total_revenue, o.total_cost,
+          s.store_id, s.store_name, s.city AS store_city, s.district AS store_district,
+          s.region AS store_region, s.store_type, s.opening_year AS store_opening_year,
+          s.size_sqm AS store_size_sqm,
+          c.customer_id, upper(trim(c.gender)) AS customer_gender,
+          c.loyalty_tier AS customer_loyalty_tier,
+          c.region AS customer_region, c.city AS customer_city,
+          e.role AS employee_role,
+          ol.num_line_items, ol.num_distinct_products, ol.num_distinct_categories,
+          ol.total_quantity, ol.avg_discount_pct,
+          ol.dominant_category, ol.dominant_subcategory, ol.dominant_brand,
+          ol.dominant_product_id,
+          CASE WHEN ol.num_line_items = 1 THEN 1 ELSE 0 END AS is_single_line_order,
+          coalesce(r.product_quality_return, 0) AS product_quality_return,
+          coalesce(r.non_quality_return, 0) AS non_quality_return,
+          CASE WHEN r.order_id IS NOT NULL THEN 1 ELSE 0 END AS any_return,
+          r.return_reason, r.return_status
+      FROM orders_all o
+      LEFT JOIN stores s ON s.store_id = o.store_id
+      LEFT JOIN customers_dedup c ON c.customer_id = o.customer_id
+      LEFT JOIN employees e ON e.employee_id = o.employee_id
+      LEFT JOIN order_lines ol ON ol.order_id = o.order_id
+      LEFT JOIN returns_flagged r ON r.order_id = o.order_id
+    # Per-target modeling views. The generic column-binding layer only ever
+    # excludes the bound target + entity from the feature set (see
+    # atlas/playbooks/binding.py split_features) — it has no domain knowledge
+    # that `non_quality_return`/`any_return`/`return_reason`/`return_status`
+    # are near-deterministic functions of `product_quality_return` (and vice
+    # versa), nor that `store_city`/`store_district`/`store_region` are exact
+    # functions of `store_name` (verified 2026-07-31: every one of the 15
+    # stores maps to exactly one city/district/region) and `dominant_category`
+    # is an exact function of `dominant_subcategory` (verified: no subcategory
+    # spans >1 category), and `customer_region` is an exact function of
+    # `customer_city` (verified: no city spans >1 region) — keeping both sides
+    # of any of these pairs one-hot encoded together is guaranteed collinear.
+    # `dominant_brand` is NOT
+    # redundant with subcategory (verified: brands span multiple subcategories,
+    # e.g. Samsung across 5) so both stay. Also excluded: `store_id` (exact
+    # function of store_name, and a meaningless numeric label besides —
+    # verified: 1:1), `is_single_line_order` (deterministic function of
+    # num_line_items == 1 by construction), and `num_distinct_products`
+    # (verified: EXACTLY equal to num_line_items on every one of the 12,000
+    # rows in this dataset — no order repeats the same product across lines —
+    # so it carries zero information num_line_items doesn't already have;
+    # `num_distinct_categories` genuinely differs on 6,508 rows and stays).
+    # Also excluded: `store_type`/`store_opening_year`/`store_size_sqm` — same
+    # principle as store_city/district/region: every store-level attribute is
+    # an exact per-store constant (verified: 0 stores have >1 distinct value
+    # for any of these) and therefore fully redundant given `store_name` is
+    # already kept at full 15-store granularity. Keeping store_name (rather
+    # than these coarser attributes) is the deliberate choice — it directly
+    # answers "which STORES carry the highest risk"; a separate "do larger/
+    # older stores carry more risk" question would need the opposite trade
+    # (drop store_name, keep the attributes), not both at once.
+    # `total_revenue`/`total_cost` correlate at r=0.995 but are NOT exactly
+    # linear (their ratio has real variance, avg 0.59 +/- 0.14) — left as-is;
+    # high correlation alone doesn't cause an exact rank deficiency, though
+    # their individual coefficients should be read with that caution in mind.
+    # `dominant_brand` is ALSO excluded — not because it's redundant with
+    # dominant_subcategory in aggregate (verified earlier: brands do span
+    # multiple subcategories), but because SOME brands are confined to exactly
+    # one subcategory (e.g. Asus only in Laptops, Canon only in Printers).
+    # One-hot-encoding a full categorical (subcategory) alongside a NESTED
+    # sub-categorical (brand) as independent blocks is a structural rank-
+    # deficiency the generic (non-nested) encoder cannot avoid — found via
+    # numpy rank analysis of the actual design matrix, not guessed. Keeping
+    # dominant_subcategory (the more central "which products" driver already
+    # established above) and dropping brand is the correct trade, not the
+    # reverse.
+    # `order_status` is excluded too — leakage-adjacent like the other return
+    # columns, just not a rank issue: verified BOTH targets are exactly 0 for
+    # every order NOT marked 'Returned' (10,442 Completed + 495 Cancelled
+    # orders, zero quality/non-quality returns among them). Including it let
+    # the model achieve trivial, near-perfect prediction on the majority class
+    # and caused a convergence failure ("logistic fit did not converge") —
+    # quasi-complete separation, a different failure mode than rank
+    # deficiency but the same underlying cause: a column too entangled with
+    # whether a return happened at all, not a genuine independent driver.
+    # Each modeling view drops every leakage sibling for its target AND every
+    # redundant coarser/duplicate column, keeping the finest non-redundant
+    # granularity — the actual "which store"/"which product" answer the
+    # question asked for.
+    extra_views:
+      returns_risk_orders_quality_model: >
+        SELECT * EXCLUDE (non_quality_return, any_return, return_reason, return_status,
+                          store_city, store_district, store_region, dominant_category,
+                          customer_region, store_id, is_single_line_order, num_distinct_products,
+                          store_type, store_opening_year, store_size_sqm, dominant_brand,
+                          order_status)
+        FROM returns_risk_orders
+      returns_risk_orders_nonquality_model: >
+        SELECT * EXCLUDE (product_quality_return, any_return, return_reason, return_status,
+                          store_city, store_district, store_region, dominant_category,
+                          customer_region, store_id, is_single_line_order, num_distinct_products,
+                          store_type, store_opening_year, store_size_sqm, dominant_brand,
+                          order_status)
+        FROM returns_risk_orders

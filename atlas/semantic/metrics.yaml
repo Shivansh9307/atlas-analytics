@@ -78,3 +78,86 @@ metrics:
       churn, revenue churn, latest-status churn, or another churn
       definition, semantic-architect MUST escalate rather than
       substituting this metric.
+
+  product_quality_return_rate:
+     aliases:
+      - product quality return rate
+      - product quality return
+      - quality return rate
+      - quality returns
+      - defective return rate
+
+     grain:
+      - product
+      - category
+      - brand
+      - store
+      - region
+
+     numerator: >
+      count(*) FILTER (WHERE product_quality_return = 1)
+
+     denominator: >
+      count(*)
+
+     expression: >
+      count(*) FILTER (WHERE product_quality_return = 1) / count(*)
+
+     unit: ratio
+
+     decomposition: non_decomposable
+
+     notes: >
+      Order-grain metric on `returns_risk_orders` (a joined view — see
+      atlas/connectors/sources.yaml). An order counts as a product-quality
+      return if its linked fact_returns row has return_reason IN
+      ('Defective Product', 'Quality Issue'), regardless of return_status
+      (Refunded/Pending/Rejected all count). Locked 2026-07-31 as one of TWO
+      deliberately separate return-risk metrics (the other is
+      non_quality_return_rate) — product-quality issues (this metric) and
+      fulfillment/fit issues (the other) are different business problems and
+      must NOT be merged into one "return rate". Product/store attribution
+      for multi-item orders is an approximation — see
+      memory/quirks/returns_risk_orders.md. If the user means ANY return
+      regardless of reason, semantic-architect MUST escalate rather than
+      substituting this metric.
+
+  non_quality_return_rate:
+     aliases:
+      - non-quality return rate
+      - non quality return rate
+      - non-quality return
+      - fulfillment return rate
+      - fit return rate
+
+     grain:
+      - product
+      - category
+      - brand
+      - store
+      - region
+
+     numerator: >
+      count(*) FILTER (WHERE non_quality_return = 1)
+
+     denominator: >
+      count(*)
+
+     expression: >
+      count(*) FILTER (WHERE non_quality_return = 1) / count(*)
+
+     unit: ratio
+
+     decomposition: non_decomposable
+
+     notes: >
+      Order-grain metric on `returns_risk_orders`. An order counts as a
+      non-quality return if its linked fact_returns row has return_reason IN
+      ('Duplicate Order', 'Wrong Item Delivered', 'Size Issue', 'Changed
+      Mind'), regardless of return_status. Locked 2026-07-31 as one of TWO
+      deliberately separate return-risk metrics (the other is
+      product_quality_return_rate) — do not merge them. Product/store
+      attribution for multi-item orders is an approximation — see
+      memory/quirks/returns_risk_orders.md. If the user means ANY return
+      regardless of reason, semantic-architect MUST escalate rather than
+      substituting this metric.
