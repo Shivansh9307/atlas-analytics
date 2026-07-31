@@ -44,6 +44,14 @@ _TEXT_DTYPES = ("VARCHAR", "CHAR", "TEXT", "STRING", "BPCHAR")
 # (Support Calls 0-10 is a category, Total Spend is not). Declared as an assumption.
 MAX_CATEGORICAL_LEVELS = 10
 
+# A text column with MORE distinct values than this is dropped rather than treated
+# as a category. Beyond this cardinality a column reads as an identifier (Product
+# Name, Customer Name, Order ID), not a segment — the categorical-findings query
+# only pulls the top MAX_LEVELS-by-count values, so a column this sparse breaks the
+# weighted-reconstruction identity the red team checks (most rows fall outside the
+# levels ever queried). Caught by GATE 3 on a real run before this cap existed.
+MAX_TEXT_CATEGORY_LEVELS = 50
+
 
 class ColumnRole(str, Enum):
     TARGET = "target"                       # the outcome being explained
@@ -349,8 +357,10 @@ def split_features(probes: dict[str, ColumnProbe], *, exclude: set[str]
                    ) -> tuple[list[str], list[str], dict[str, str]]:
     """Partition remaining columns into (numeric, categorical, dropped-with-reason).
 
-    The rule is declared rather than clever: text is categorical; a numeric with
-    <= MAX_CATEGORICAL_LEVELS distinct values is categorical; a constant is dropped.
+    The rule is declared rather than clever: text is categorical (up to
+    MAX_TEXT_CATEGORY_LEVELS distinct values — beyond that it reads as an
+    identifier, not a segment); a numeric with <= MAX_CATEGORICAL_LEVELS distinct
+    values is categorical; a constant is dropped.
     """
     numeric: list[str] = []
     categorical: list[str] = []
@@ -361,6 +371,10 @@ def split_features(probes: dict[str, ColumnProbe], *, exclude: set[str]
         p = probes[name]
         if p.is_constant:
             dropped[name] = f"constant ({p.distinct} distinct value)"
+        elif p.is_text and p.distinct > MAX_TEXT_CATEGORY_LEVELS:
+            dropped[name] = (f"{p.distinct} distinct text values (> "
+                             f"{MAX_TEXT_CATEGORY_LEVELS}) — reads as an identifier, "
+                             f"not a segment")
         elif p.is_text:
             categorical.append(name)
         elif p.is_numeric and p.distinct <= MAX_CATEGORICAL_LEVELS:
