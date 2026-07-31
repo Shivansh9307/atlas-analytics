@@ -65,19 +65,75 @@ sources:
   #   byte_limit: 5000000000
   #   access: mcp:databricks
 
-  Sales:
+  # --- LIVE: retail star schema (9 files, data/) ---
+  dim_customers_csv:
     dialect: duckdb
     kind: file
-    path: ./data/Sales.xlsx
-    sheet: Sales_Data        # workbook also has a 'Business_Questions' sheet; pin the fact table
-    table_name: Sales
+    path: ./data/dim_customers.csv
+    table_name: dim_customers
     row_limit: 5000000
     access: mcp_or_driver:none   # local DuckDB, no MCP needed
 
-  churn_csv:
+  dim_date_csv:
     dialect: duckdb
     kind: file
-    path: ./data/churn.csv
-    table_name: churn
+    path: ./data/dim_date.csv
+    table_name: dim_date
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  dim_employees_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/dim_employees.csv
+    table_name: dim_employees
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  dim_products_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/dim_products.csv
+    table_name: dim_products
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  dim_stores_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/dim_stores.csv
+    table_name: dim_stores
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  fact_order_details_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/fact_order_details.csv
+    table_name: fact_order_details
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  fact_orders_2022_2023_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/fact_orders_2022_2023.csv
+    table_name: fact_orders_2022_2023
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  fact_orders_2024_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/fact_orders_2024.csv
+    table_name: fact_orders_2024
+    row_limit: 5000000
+    access: mcp_or_driver:none   # local DuckDB, no MCP needed
+
+  fact_returns_csv:
+    dialect: duckdb
+    kind: file
+    path: ./data/fact_returns.csv
+    table_name: fact_returns
     row_limit: 5000000
     access: mcp_or_driver:none   # local DuckDB, no MCP needed
