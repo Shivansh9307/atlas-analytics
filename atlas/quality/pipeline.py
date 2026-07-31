@@ -49,12 +49,12 @@ def run_copilot(con: Connector, table: TableRef, source: str | None = None,
     issues = detect_issues(con, table)
     before = score_table(con, table, issues=issues)
 
-    plan = cl.build_plan(con, table, source)
+    plan = cl.build_plan(con, table, source, issues=issues)
     if not plan.transforms:
         # Nothing to repair (e.g. the clean EMEA fixture) — clean table == base.
         return _decide(source, table.name, table.name, before, before, [], [], [])
 
-    res = cl.apply(con, table, source=source, run_dir=run_dir, persist=False)
+    res = cl.apply(con, table, source=source, run_dir=run_dir, persist=False, plan=plan)
     applied = [t.module_id for t in res.applied]
     pending = [t.module_id for t in res.skipped]
 

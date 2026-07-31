@@ -1,0 +1,159 @@
+{
+  "run_id": "r-20260731-133624",
+  "claims": [
+    {
+      "claim_id": "c_base_rate",
+      "text": "Overall 'non_quality_return' rate",
+      "value": 5.97,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "4a1faf75cc2d70bf",
+      "evidence_tier": "decomposed",
+      "slide_number": null,
+      "notes": "measured directly from the source",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_group_employee_role",
+      "text": "'employee_role' splits the outcome: 'None' runs 3.6% vs 6.0% overall (-2.3pp, n=632)",
+      "value": -2.3358,
+      "query_hash": "5334f99cf56da3f5",
+      "result_hash": "96683d55180cbadb",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "rate_gap_pp; n=12000",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_group_dominant_subcategory",
+      "text": "'dominant_subcategory' splits the outcome: 'Networking' runs 9.6% vs 6.0% overall (+3.6pp, n=94)",
+      "value": 3.5995,
+      "query_hash": "2db26242e2c9727a",
+      "result_hash": "a1a30ed56d6fbc72",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "rate_gap_pp; n=12000",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_group_store_name",
+      "text": "'store_name' splits the outcome: 'Lotus Tanta Stars' runs 4.1% vs 6.0% overall (-1.8pp, n=555)",
+      "value": -1.8309,
+      "query_hash": "9728011f9bf3b58f",
+      "result_hash": "65d2fea109260022",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "rate_gap_pp; n=12000",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_corr_avg_discount_pct",
+      "text": "'avg_discount_pct' is associated with the outcome (r=+0.016): higher values occur more often among positives",
+      "value": 0.0156,
+      "query_hash": "374cd29e7d6fbc4d",
+      "result_hash": "e762625a819197f1",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "pearson_r; n=12000",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_group_customer_city",
+      "text": "'customer_city' splits the outcome: 'Aswan' runs 4.5% vs 6.0% overall (-1.4pp, n=463)",
+      "value": -1.4394,
+      "query_hash": "f5748d6bad2d209a",
+      "result_hash": "062fd362c8381ee0",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "rate_gap_pp; n=12000",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_tier_low",
+      "text": "Low-risk entities",
+      "value": 12000,
+      "query_hash": "907106af19deab5d",
+      "result_hash": "47174781b05aa3dd",
+      "evidence_tier": "decomposed",
+      "slide_number": null,
+      "notes": "counted in SQL over the registered scores view",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_or_dominant_subcategory_networking",
+      "text": "Odds ratio, dominant_subcategory=Networking (vs baseline of 'dominant_subcategory')",
+      "value": 2.1852,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "a7a79ab8cd259fd4",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "95% CI 0.681-7.016, p=0.189",
+      "derivation": "model:a7a79ab8cd259fd4",
+      "parent_claims": [
+        "c_base_rate"
+      ]
+    },
+    {
+      "claim_id": "c_or_dominant_subcategory_tvs___screens",
+      "text": "Odds ratio, dominant_subcategory=TVs & Screens (vs baseline of 'dominant_subcategory')",
+      "value": 1.7254,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "a7a79ab8cd259fd4",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "95% CI 0.591-5.040, p=0.319",
+      "derivation": "model:a7a79ab8cd259fd4",
+      "parent_claims": [
+        "c_base_rate"
+      ]
+    },
+    {
+      "claim_id": "c_or_total_revenue",
+      "text": "Odds ratio, total_revenue (per 1 SD (8256) of total_revenue)",
+      "value": 1.6574,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "a7a79ab8cd259fd4",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "95% CI 0.656-4.190, p=0.286",
+      "derivation": "model:a7a79ab8cd259fd4",
+      "parent_claims": [
+        "c_base_rate"
+      ]
+    },
+    {
+      "claim_id": "c_or_total_cost",
+      "text": "Odds ratio, total_cost (per 1 SD (7158) of total_cost)",
+      "value": 0.6201,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "a7a79ab8cd259fd4",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "95% CI 0.243-1.585, p=0.318",
+      "derivation": "model:a7a79ab8cd259fd4",
+      "parent_claims": [
+        "c_base_rate"
+      ]
+    },
+    {
+      "claim_id": "c_or_dominant_subcategory_printers",
+      "text": "Odds ratio, dominant_subcategory=Printers (vs baseline of 'dominant_subcategory')",
+      "value": 1.5331,
+      "query_hash": "04f30bc4ce29ae2e",
+      "result_hash": "a7a79ab8cd259fd4",
+      "evidence_tier": "correlational",
+      "slide_number": null,
+      "notes": "95% CI 0.500-4.702, p=0.455",
+      "derivation": "model:a7a79ab8cd259fd4",
+      "parent_claims": [
+        "c_base_rate"
+      ]
+    }
+  ]
+}

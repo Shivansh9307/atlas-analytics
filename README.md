@@ -1,299 +1,272 @@
-# Atlas — your on-demand analytics team
+# Atlas
 
-**Ask a business question in plain English. Get back a boardroom-ready slide deck —
-with the story, the recommendation, and every number traceable to where it came from —
-in minutes instead of weeks.**
+**An autonomous analytics pipeline that refuses to ship a number it cannot trace back
+to a query.** Ask a business question in plain English; get a validated, provenance-
+stamped deck — or a blocked run explaining exactly why it wouldn't answer.
 
-You don't write formulas or SQL. You ask the kind of question you'd bring to your data
-team:
-
-> *"Why did EMEA gross margin drop 4 points in Q2?"*
-
-Atlas frames the question, digs through the data, finds the real cause, argues with
-itself to make sure it's right, writes the narrative, and hands you a deck with speaker
-notes. This guide is written for the people who **read and act on** those decks — not
-for engineers. (There's a short technical appendix at the end for your data team.)
+![tests](https://img.shields.io/badge/tests-380%20passing-brightgreen)
+![python](https://img.shields.io/badge/python-3.13-blue)
+![license](https://img.shields.io/badge/license-MIT-informational)
 
 ---
 
-## The one thing that makes Atlas different
+## The receipt
 
-Most "AI analytics" tools give you a confident answer and no way to check it. Atlas does
-the opposite:
+Every figure carries a provenance ID resolving to a stored query hash and result hash.
+A number without one **blocks the build**. This is from a real run — the red team
+independently re-derived the headline from raw data, without seeing the first
+analyst's SQL:
 
-> **Every single number in the deck can be traced back to the exact query that
-> produced it.** No number appears unless Atlas can show its work.
+```
+# runs/<id>/validation.md — independent re-derivation
 
-That one rule changes everything about how much you can trust what you're looking at.
-The rest of this page explains how that promise is kept, what you get, and how to read
-it.
+| check                          | analyst  | red-team | within tolerance |
+|--------------------------------|----------|----------|------------------|
+| base rate                      | 0.473685 | 0.473685 | YES              |
+| weighted rates over 'Gender'   | 0.473685 | 0.473685 | YES              |
+| cliff jump at Payment Delay>=16| 0.611904 | 0.611904 | YES              |
+
+Attacks: none survived.        Verdict: PASS.        Confidence: A (1.00)
+```
+
+```jsonc
+// runs/<id>/provenance.json — the claim ledger
+{
+  "claim_id":     "c_f_thresh_payment_delay",
+  "text":         "'Payment Delay' has a threshold effect at [16.0, 21.0]…",
+  "value":        0.6119,
+  "query_hash":   "183edb6fc26780f1",
+  "result_hash":  "18cef1e73c939fc0",
+  "evidence_tier": "tested",
+  "notes":        "cliff_jump; n=64374"
+}
+```
+
+**→ Click into the full run: [`examples/churn-run/`](examples/churn-run/)** — brief,
+findings, validation, ledger, and the generated `deck.pptx`.
 
 ---
 
-## Quickstart — how to use it
+## What it did on a real dataset
 
-Want to *drive* Atlas rather than just read about it? Here's the whole loop in five
-steps:
+`/analyze "what drives churn"` over **64,374 customer records** (real data, not the
+seeded 6,001-row test fixture):
 
-1. **Install it** (one time): `uv venv --python 3.13.9 && uv pip install -e ".[dev]"`
-2. **See a deck immediately** — run the bundled example and open the resulting
-   `runs/<run_id>/deck.pptx`.
-3. **Add your data** — drop a CSV in `data/`, register it in
-   `atlas/connectors/sources.yaml`, then `/connect` and `/profile` it. (Warehouses:
-   fill in `.env` and install the `[warehouse]` extra.)
-4. **Ask your question** — in Claude Code, `/analyze "Why did <metric> change?"`. The
-   specialist agents adapt to your data and build the deck.
-5. **Get other formats** — `/export html,slack,email <run_id>` for a web page and
-   ready-to-send summaries.
-
-> **📘 Full step-by-step operator guide, with copy-paste commands for every step →
-> [USAGE.md](USAGE.md)** — adding data sources, running commands and skills, getting the
-> PowerPoint, exporting, and troubleshooting.
+- **Found a cliff, not a slope.** Churn steps from **10.1% → 71.3% at 16 days
+  payment-late** — a 7.06× jump at a threshold, not a gradual trend.
+- **Proved the cliff matters.** 2-cut step R² **1.000** vs linear R² 0.830 — a linear
+  model would have understated the effect and buried the actionable cutoff.
+- **Checked itself.** Red team re-derived the jump independently: `0.611904` vs
+  `0.611904`. No attack survived. Grade **A**.
+- **Refused to overclaim.** The narrative states plainly: *"None of them establishes
+  that changing a driver would change the outcome; that requires an experiment."*
 
 ---
 
-## Why you can trust the numbers
+## When it refuses
 
-Think of Atlas as a very careful analyst who refuses to cut corners. Here's what that
-means for you, in plain terms:
+The safeguards matter only if they actually fire. Here is one that did —
+**[`examples/blocked-run/`](examples/blocked-run/)**, returns-risk over 12,000 orders
+joined from 9 CSVs:
 
-| The safeguard | What it means for your decision |
+| | |
 |---|---|
-| **Everything is sourced** | Every figure links to the query behind it. If someone asks "where did 56% come from?", the answer is in the appendix. |
-| **It checks its own work** | A separate "red-team" step re-calculates the headline number a second way, from the raw data, without looking at the first calculation. The two must agree within a hair (0.5%) or the deck is blocked. |
-| **It says what it assumed** | If your question was ambiguous ("margin" could mean three things), Atlas picks the most likely meaning, **tells you it did**, and lists it in an Assumptions page — never buried. |
-| **It refuses rather than guesses** | If the data is too messy or incomplete to answer honestly, Atlas stops and tells you what it would need. It will **not** produce a confident-looking deck over bad data. |
-| **It never changes your data** | Atlas only ever *reads*. It cannot edit, delete, or overwrite anything in your systems. |
-| **It labels a hunch as a hunch** | Every claim is tagged with how strong the evidence is — from "proven by the math" down to "a plausible hypothesis." You always know how much weight a statement can bear. |
+| Held-out AUC | **0.4954** — a coin flip |
+| Arithmetic re-derivations | base rate, confusion matrix, calibration — **all matched exactly** |
+| Verdict | **GATE 3 red-team veto** — *"the model does not earn its complexity"* |
+| What shipped | **nothing.** No deck, no Power BI project |
 
-If any of these checks fail, **you never see a polished deck** — you get a clear note
-about what's blocking and what's needed. That's on purpose.
+It failed on *discrimination*, not arithmetic. Everything computed correctly and the
+pipeline still concluded the result wasn't worth presenting. A GATE 3 failure halts the
+DAG **before** the `deck` and `emit` nodes execute, so no polished artefact exists to be
+mistaken for a validated one. The run writes `BLOCKED.md` naming the owner of the fix.
 
----
+<img src="docs/img/summary.png" alt="The GATE 3 veto reported at the end of a run" width="100%">
 
-## Trust before intelligence — the Data Quality Copilot
-
-Before Atlas analyses anything, a **Data Quality Copilot** inspects your data the way
-a seasoned data engineer would. It scores quality across ten dimensions (completeness,
-freshness, consistency, type-safety, and more), explains every issue in business terms,
-and — with your approval — fixes them into a **clean layer** that sits *beside* your raw
-data. Your original file is never touched; Atlas only ever adds tidy `*_Clean` columns.
-
-A real example from a sales dataset:
-
-| Issue found | Business risk | Fix |
-|---|---|---|
-| `Region` blank for every US/Canada order (35% of rows) | Any "by region" chart silently drops North America | Fill `Region_Clean` from the country |
-| `Order_Date` stored as text | Trends and "last 90 days" filters break | Add a real date column |
-| `Quarter` uses a fiscal calendar (Sep = Q4) | Quarterly numbers land in the wrong bucket | Flagged for **your** approval — Atlas won't guess |
-
-High-confidence fixes apply automatically; anything genuinely ambiguous waits for your
-sign-off. Every repair is previewable, reversible, and logged. Run it yourself with
-**`/clean <source> --preview`**, then **`--apply`**; browse the health of every dataset
-with **`/catalog`**. When you run a full analysis, this all happens automatically and a
-**Data Readiness Gate** blocks the work if the data still isn't trustworthy enough.
+<sub>*Claude Code session transcript — this is the operator's view, not a product UI.*</sub>
 
 ---
 
-## What you receive
+## Design decisions
 
-For a full analysis, Atlas produces a complete, self-contained package. The headline
-deliverable is a slide deck that follows the same trustworthy shape every time:
+The parts that took judgement rather than typing:
 
-1. **A title that makes a claim, not a label.** Not *"EMEA Margin Analysis"* but
-   *"EMEA margin fell 4 points because sales shifted toward lower-margin products."*
-   You know the answer from slide one.
-2. **The key insight** — the single most important finding.
-3. **The evidence** — one clean chart per point, no clutter.
-4. **What it's worth** — the size of the opportunity or the cost, in dollars, with a
-   range (more on this below).
-5. **So what** — why it matters for the decision in front of you.
-6. **The recommendation** — concrete next steps, each with an owner, a success measure,
-   a safety measure, and a follow-up date.
-7. **An appendix** — the assumptions made, the method used, and the full source table
-   linking every number to its query.
+**The red team never sees the first analyst's work.** Independence is structural, not
+procedural. `red-team-validator` runs in an isolated context and re-derives the headline
+from raw sources — different SQL, no window functions where the original used them,
+explicit `CASE` re-splits. Two agents agreeing when one *copied* the other is worth
+nothing; two agreeing when neither saw the other is worth the gate. Enforced in
+`atlas/lib/gates.py`; the tolerance is ±0.5% relative.
 
-Alongside the deck you also get **speaker notes** for each slide (about a minute of
-talking track), a **web page version** you can open in any browser or email to anyone,
-and ready-to-send **Slack, email, and one-paragraph executive summaries** — all drawn
-from the same validated numbers. For driver and risk questions, Atlas can also hand
-back a **ready-to-open Power BI project** — the dashboard, charts, and KPI page
-already laid out, not a file you have to assemble yourself.
+**The numeric engine never calls an LLM.** `atlas/` is deterministic and fully tested —
+every number comes from SQL through `Connector.run()` or from the maths modules
+(`decomposition.py`, `stats.py`, `logit.py`). `.claude/` is the reasoning and prose
+layer. The split is the point: an LLM that can produce a number can hallucinate one, so
+it is never given the opportunity. `atlas/llm.py` is an optional, explicitly non-numeric
+shim and can be disabled entirely.
 
----
+**Repairs go to a clean layer, never in place.** Raw is sacred. The Data Quality Copilot
+materialises derived `<col>_Clean` views in the **local** DuckDB engine via
+`Connector.materialize_clean()` — which deliberately bypasses `run()` so the read-only
+guard on `CREATE` stays intact. Warehouse clean layers are emitted as DDL for an
+operator to apply, not executed. Every repair is previewable, reversible, and logged.
 
-## How to brief a good question
+**Read-only is enforced in two independent places.** A PreToolUse hook
+(`.claude/hooks/pre_tool_use.py`) *and* the connector layer (`atlas/lib/sqlguard.py`).
+Defence in depth, not good intentions — either alone is a single point of failure, and
+the hook cannot see SQL constructed at runtime.
 
-Atlas does best with the same brief you'd give a sharp analyst. The more specific you
-are, the sharper the answer:
+**Model output becomes measurable, not asserted.** `Connector.materialize_scores()`
+registers predictions as a local view, so numbers *about* a model (tier counts,
+confusion matrix) are ordinary SQL results with real hashes. Only coefficients stay
+derived — and `record_derived()` **raises** on any evidence tier above `correlational`.
+An observational fit is never `tested`, whatever the p-value.
 
-- **Name the metric** — "gross margin," "conversion rate," "revenue."
-- **Name the time window** — "Q2 vs Q1," "last month vs the month before."
-- **Say what decision it unblocks** — "we're deciding whether to cut costs or change the
-  sales mix."
+<img src="docs/img/self-correction.webp" alt="The router's plan being overridden mid-run" width="100%">
 
-**Strong question:** *"Why did EMEA gross margin drop 4 points in Q2 versus Q1, and is
-it something we should fix with pricing or with sales mix?"*
-
-**Weaker question:** *"How's margin doing?"* — Atlas will still answer, but it will have
-to make more assumptions (which it will declare) to fill in the blanks.
-
-You don't need to phrase it perfectly. If something's ambiguous, Atlas resolves it the
-most sensible way and shows you that choice — it won't stall waiting for a perfect brief.
+<sub>*Session transcript: the cost-router's own agent selection being challenged and
+corrected before any query ran — it had dropped the statistician from a significance
+question.*</sub>
 
 ---
 
-## How Atlas works — the journey of your question
+## Architecture
 
-Here's what actually happens between your question and the finished deck. Each stage is
-a checkpoint that protects you from a common way analyses go wrong. We'll follow the
-EMEA margin question the whole way through.
+Two layers, deliberately separated:
 
-**Step 1 — Frame the question.**
-Atlas turns your plain-English ask into a precise brief: who the decision-maker is, the
-exact metric, the comparison window, and — importantly — what's *out of scope*. This is
-where it writes down any assumptions.
-*Protects you from:* answering the wrong question precisely.
+| | |
+|---|---|
+| **`atlas/`** | The deterministic numeric engine. Never calls an LLM to produce a number. Fully tested. |
+| **`.claude/`** | The reasoning layer — agents, slash commands, skills, hooks. Plain markdown you can read and edit. |
 
-**Step 2 — Check the data is trustworthy.**
-Before calculating anything, Atlas profiles the data: Is it complete? Are there
-duplicates? Gaps? It issues a plain **GO / NO-GO** verdict.
-*Protects you from:* a beautiful analysis built on broken data. (If it's NO-GO, Atlas
-stops here and tells you what's wrong.)
+The pipeline runs as an explicit DAG (`atlas/orchestrator.py::SPECS` → Kahn's algorithm
+→ tiers, `max_concurrency=3`, per-node timeout + retry, circuit breaker). Gates are
+**pure functions** over already-computed inputs: the node computes, the gate decides.
 
-**Step 3 — Explore the possibilities.**
-Atlas considers several explanations at once — was it a time trend? a particular
-segment? a shift in the product mix? — rather than latching onto the first idea.
-*Protects you from:* tunnel vision and cherry-picking.
+Four plugin extension points, each requiring no core edits:
 
-**Step 4 — Find the true cause by breaking the number down.**
-This is the heart of it. Instead of guessing, Atlas does the math that splits the change
-into its real drivers. For EMEA, it separates *"did each product get less profitable?"*
-(no) from *"did we sell a different mix of products?"* (yes) — and finds the entire
-4-point drop came from **selling more low-margin Hardware and less high-margin
-Software**, not from any product getting worse.
-*Protects you from:* confusing correlation with cause, and from "vibes-based" answers.
+- **`atlas/playbooks/`** — one analysis *shape* per plugin (`margin`, `descriptive`,
+  `logistic`). A playbook declares the columns it needs as `ColumnRequirement`s rather
+  than hardcoding a schema, so it generalises across datasets.
+- **`atlas/exporters/`** — one output format per plugin (html/pdf/slack/email, a
+  SQL→DAX transpiler, a complete Power BI project). The DAX transpiler **escalates
+  rather than approximating**: a measure that looks plausible and computes something
+  else is worse than a missing one.
+- **`atlas/quality/modules/`** — pluggable, config-driven repair modules.
+- **`atlas/quality/plugins.py`** — whole new copilots (Governance, PII, …).
 
-**Step 5 — Stress-test the finding.**
-An independent red-team re-derives the headline from scratch and actively tries to break
-the conclusion — checking for filtering mistakes, missing data, and date-boundary
-errors. It also assigns an **A–F confidence grade**.
-*Protects you from:* a single mistake sailing through unquestioned.
-
-**Step 6 — Write the story.**
-Atlas writes for your named decision-maker: the answer in one sentence first, then the
-supporting points, then the evidence. Every number carries its source tag.
-*Protects you from:* a data dump with no clear "so what."
-
-**Step 7 — Build the deck and pressure-test it.**
-Atlas assembles the slides, then role-plays your toughest stakeholder and generates the
-five hardest questions they'd ask — checking the deck can answer every one before you
-ever present it.
-*Protects you from:* getting caught flat-footed in the room.
-
-Throughout, the deck must clear **five quality checkpoints** (good data, clear
-definitions, the red-team's approval, every number sourced, and every hard question
-answerable). Miss any one, and the deck doesn't ship.
+Every run writes a complete audit trail to `runs/<run_id>/`. *(The reasoning layer
+currently ships 18 agents, 28 commands and 16 skills — enumerated at the bottom.)*
 
 ---
 
-## How to read the result
+## How a question becomes a deck
 
-A few things on an Atlas deck are worth knowing how to read:
+Seven stages, each a checkpoint against a specific failure mode:
 
-- **The confidence grade (A–F).** A quick verdict on how solid the finding is. **A**
-  means every internal check passed cleanly. Anything lower comes with a visible reason.
-  Treat it like a credit rating for the analysis.
-- **Evidence tiers.** Each claim is labelled by strength:
-  **decomposed** (proven by the math) → **tested** (statistically significant) →
-  **correlational** (moves together, cause unproven) → **hypothesis** (plausible, not
-  yet shown). A recommendation resting on a "hypothesis" deserves more caution than one
-  resting on "decomposed." A number that comes from a statistical model (like a risk
-  score) is never invented either — it always traces back to the exact data it was
-  trained on, and it's always labelled correlational, never presented as a proven cause.
-- **"What it's worth" and the tornado.** When Atlas sizes an opportunity, it never gives
-  a single false-precision number. It gives a base estimate *and* a "tornado" chart
-  showing which assumption the number depends on most — so you know where the risk sits.
-  (E.g. *"worth about $40 on the fixture data, and it hinges most on how many of those
-  margin points are truly recoverable."*)
-- **The Assumptions page.** Read it. It's where Atlas tells you the judgment calls it
-  made. If you disagree with one, that's a quick correction — not a reason to distrust
-  the whole deck.
-- **The Provenance page.** The receipts. Every number, its value, and a code linking it
-  to the exact query. You'll rarely need it — but it's there, and that's the point.
+| Stage | Guards against |
+|---|---|
+| **Frame** — turn the ask into a precise brief; write down assumptions | Answering the wrong question precisely |
+| **Profile & clean** — 10-dimension quality score, repairs to a clean layer, GO / NO-GO | A beautiful analysis on broken data |
+| **Explore** — several hypotheses in parallel, each in isolation | Tunnel vision, cherry-picking |
+| **Decompose** — mix vs. rate, contribution, Simpson's check | Confusing correlation with cause |
+| **Red-team** — blind re-derivation + active attacks; can **veto** | One mistake sailing through |
+| **Narrate** — answer-first, for the named decision owner | A data dump with no "so what" |
+| **Pressure-test** — simulate the toughest stakeholder's 5 hardest questions | Getting caught flat-footed |
 
----
+Five gates must clear before anything ships. Miss one and you get `BLOCKED.md`, not a
+degraded deck.
 
-## What you can ask Atlas for
+**Worked example of the decomposition step:** for a margin drop, it separates *"did each
+product get less profitable?"* from *"did we sell a different mix?"* — attributing the
+move to mix vs. rate rather than asserting a cause. That distinction is the whole
+difference between a real root cause and a plausible story.
 
-You don't need the full pipeline every time. Atlas matches the effort to the question:
+**Evidence tiers.** Every claim is labelled `decomposed` (proven by the maths) →
+`tested` (statistically significant) → `correlational` (moves together) → `hypothesis`
+(plausible, unshown). A recommendation resting on a hypothesis deserves more caution
+than one resting on a decomposition — and the label makes that visible instead of
+leaving it to tone.
 
-- **A full analysis** — "Why did X change?" → the complete deck described above.
-- **A quick number** — "What was EMEA revenue in Q2?" → a straight answer with a chart,
-  in under a couple of minutes.
-- **A single chart** — "Make a clean chart of the checkout funnel." → one publication-
-  quality visual.
-- **What's driving something** — "What's driving customer churn?" → a ranked list of
-  the strongest factors, calling out any sharp cutoffs a plain average would hide
-  (e.g. *"churn jumps once payment is 16+ days late"* — a cliff, not a gradual slope).
-  Every factor is measured and labelled as an association, never presented as a
-  proven cause.
-- **Who's likely to do something** — "Who's about to churn?" → a risk-ranked list of
-  individuals with plain-English reasons for each score. Never a black box: every
-  factor behind a score is shown with its direction and strength, not just a number.
-- **A forecast** — "Where is this metric heading?" → a projection **with an honest
-  uncertainty range** (only when there's enough history; otherwise Atlas says so).
-- **An experiment design** — "How should we A/B test the new checkout?" → sample size,
-  how long to run, and the safety metrics to watch.
-- **"Redo just one part"** — after feedback, Atlas can re-run a single stage (say, just
-  the narrative) without repeating the whole analysis.
+<img src="docs/img/dual-evidence.webp" alt="Two results reported at different evidence tiers" width="100%">
 
-Not sure which you need? Just ask your question in plain English — Atlas figures out the
-right path.
+<sub>*Session transcript: the same question answered at two grains — an order-level test
+with real power reported as `tested`, and a 3-point year-level trend reported as
+`hypothesis` with an explicit note that no test on 3 points could distinguish a trend
+from noise.*</sub>
 
 ---
 
-## Under the hood — the team, the playbooks, and the menu
+## What Atlas can and can't do
 
-Atlas isn't one big black box. It's organised the way a good analytics *team* is, and
-that structure is exactly what makes it careful. Three ideas:
+Honesty is part of the product, so here are the limits stated plainly:
 
-- **Agents** — a team of **specialists**, each with one job (framing the question,
-  checking the data, breaking the number down, red-teaming the result, building the
-  deck). Each works in its own isolated workspace, so they stay focused and act as
-  checks on one another — the red-team literally re-does the headline without seeing
-  the first analyst's work.
-- **Skills** — the **playbooks and standards** each specialist follows: how to break a
-  metric into its drivers, how to design an honest chart, how to validate a number,
-  how to write for an executive.
-- **Commands** — the **menu** an analyst types to drive Atlas (you saw the plain-English
-  versions above; these are the exact shortcuts).
+- **It's a power tool for an analyst, not a replacement for one.** It handles roughly
+  the 80% of an analysis that eats all the time. **You are the final check** — run it
+  first on questions you already know the answer to, so you can catch and correct it.
+- **It needs your business context.** The more you teach it your metrics, product names
+  and definitions, the better it gets. It learns from corrections; a lesson that fires
+  twice is promoted into a hard artefact rather than left as a prompt.
+- **Some capabilities need the right data.** Forecasting needs enough history; cohort
+  analysis needs a customer identifier. When the data can't support something, Atlas
+  says so rather than faking it.
+- **Prompt-injected lessons are best-effort.** Only promoted artefacts — a locked metric
+  definition, a quirk assertion, a hook rule — are mechanically guaranteed. The README
+  will not claim "never makes the same mistake twice" for anything weaker.
+- **Connecting live warehouses is a setup step.** Files work immediately. Snowflake,
+  BigQuery, Postgres and Databricks need a one-time read-only connection.
 
-The full reference is below — expand what you're curious about.
+---
+
+## Quickstart
+
+```bash
+uv venv --python 3.13.9
+uv pip install -e ".[dev]"        # add ".[warehouse]" for warehouse connectors
+
+# run the full pipeline on the bundled fixture — no API key needed
+uv run python -c "from atlas.orchestrator import run_analysis; \
+r = run_analysis('Why did EMEA gross margin drop 4pts in Q2?'); \
+print(r.status, '|', r.headline); print(r.run_dir)"
+
+uv run pytest -q                  # 380 tests
+```
+
+Then in Claude Code: `/connect <source>` → `/profile <source>` → `/analyze "<question>"`.
+
+> **📘 Full operator guide with copy-paste commands for every step → [USAGE.md](USAGE.md)**
+> — adding data sources, running commands, exporting, and troubleshooting.
+
+The rules the system operates under are in [`CLAUDE.md`](CLAUDE.md) — the project
+constitution, always in context, and the source of every "it refuses to…" above.
+
+---
+
+## Reference
 
 <details>
 <summary><strong>The analytics team — 18 specialist agents</strong></summary>
 
 | Agent | What it does | When |
 |---|---|---|
-| requirements-analyst | Turns your plain-English ask into a precise brief and writes down any assumptions | Framing |
+| requirements-analyst | Turns a plain-English ask into a precise brief and writes down assumptions | Framing |
 | source-profiler | Checks the data is complete and trustworthy; issues a GO / NO-GO | Framing |
-| data-quality-copilot | Scores your data across 10 dimensions and auto-repairs it into a clean layer before any analysis runs | Framing |
-| semantic-architect | Pins down exactly what each metric means, from the locked definitions | Framing |
-| sql-engineer | Writes the careful, read-only, cost-aware queries and stores every one | Throughout |
+| data-quality-copilot | Scores data across 10 dimensions and auto-repairs it into a clean layer | Framing |
+| semantic-architect | Pins down what each metric means, from locked definitions | Framing |
+| sql-engineer | Writes careful, read-only, cost-aware queries and stores every one | Throughout |
 | explorer | Chases several possible explanations at once, each in isolation | Exploration |
-| root-cause-analyst | Breaks the number down into its true drivers (mix vs. rate, Simpson's check) | Diagnosis |
+| root-cause-analyst | Breaks the number down into true drivers (mix vs. rate, Simpson's check) | Diagnosis |
 | statistician | Tests whether a finding is real or noise; flags anything under-powered | Diagnosis |
 | red-team-validator | Independently re-derives the headline and attacks the conclusion; can veto | Validation |
-| opportunity-sizer | Puts a dollar figure on the finding, with a sensitivity range | Diagnosis |
-| forecaster | Projects a metric forward with an honest uncertainty band *(when there's enough history)* | Diagnosis |
-| cohort-analyst | Retention, vintage, and lifetime-value analysis *(when the data has customers)* | Diagnosis |
-| narrative-writer | Writes the answer-first story for your named decision-maker | Story |
+| opportunity-sizer | Puts a figure on the finding, with a sensitivity range | Diagnosis |
+| forecaster | Projects a metric forward with an honest uncertainty band | Diagnosis |
+| cohort-analyst | Retention, vintage, and lifetime-value analysis | Diagnosis |
+| narrative-writer | Writes the answer-first story for the named decision owner | Story |
 | deck-builder | Assembles the branded slide deck with speaker notes | Deck |
-| stakeholder-simulator | Role-plays your toughest stakeholder and checks the deck answers their 5 hardest questions | Deck |
-| comms-drafter | Drafts the Slack / email / one-paragraph exec summaries | Deck |
-| experiment-designer | Designs A/B tests — sample size, guardrails, decision rule *(on demand, not in every run)* | On demand |
-| retrospective-agent | After each run, records what was corrected so the mistake isn't repeated | Learning |
+| stakeholder-simulator | Role-plays the toughest stakeholder; checks the deck answers their 5 hardest questions | Deck |
+| comms-drafter | Drafts the Slack / email / exec summaries | Deck |
+| experiment-designer | Designs A/B tests — sample size, guardrails, decision rule | On demand |
+| retrospective-agent | Records what was corrected so the mistake isn't repeated | Learning |
 
 </details>
 
@@ -305,9 +278,9 @@ The full reference is below — expand what you're curious about.
 |---|---|
 | `/analyze "<question>"` | The full analysis → validated deck |
 | `/quick "<question>"` | A fast, single-number answer with a chart |
-| `/rca <metric> <window>` | Root-cause only (skips the framing stage) |
-| `/route "<question>"` | Suggests the cheapest path that answers your question |
-| `/cao "<question>"` | Plans a run before you commit to it: the path, the agents involved, and the estimated cost |
+| `/rca <metric> <window>` | Root-cause only (skips framing) |
+| `/route "<question>"` | Suggests the cheapest path that answers it |
+| `/cao "<question>"` | Plans a run before you commit: path, agents, estimated cost |
 
 **Analytical tools**
 | Command | What it does |
@@ -318,11 +291,11 @@ The full reference is below — expand what you're curious about.
 | `/experiment <base> <mde>` | Design an A/B test |
 | `/profile <source>` | Data-quality check with a GO / NO-GO |
 
-**Redo just one part** (after feedback, without repeating everything)
+**Redo one stage** (after feedback, without repeating everything)
 | Command | What it does |
 |---|---|
-| `/explore <run_id>` | Re-run the exploration stage |
-| `/diagnose <run_id>` | Re-run the root-cause + stats stage |
+| `/explore <run_id>` | Re-run exploration |
+| `/diagnose <run_id>` | Re-run root-cause + stats |
 | `/narrative <run_id>` | Rewrite the story |
 | `/deck <run_id>` | Rebuild the deck |
 | `/validate <run_id>` | Re-run the red-team check |
@@ -330,16 +303,16 @@ The full reference is below — expand what you're curious about.
 **Share & revisit**
 | Command | What it does |
 |---|---|
-| `/export <format> <run_id>` | Export to HTML / PDF / Slack / email / exec summary / a ready-to-open Power BI project |
+| `/export <format> <run_id>` | HTML / PDF / Slack / email / exec summary / Power BI project |
 | `/runs [run_id]` | List, inspect, and compare past analyses |
 | `/resume <run_id>` | Resume an interrupted run where it left off |
-| `/replay <run_id>` | Re-run a past analysis against today's data to see if it still holds |
+| `/replay <run_id>` | Re-run a past analysis against today's data |
 
 **Knowledge & learning**
 | Command | What it does |
 |---|---|
-| `/business [term]` | Browse the glossary, products, teams, and metric ownership |
-| `/metrics [metric]` | Browse the metric dictionary (definition + owner) |
+| `/business [term]` | Glossary, products, teams, metric ownership |
+| `/metrics [metric]` | Metric dictionary (definition + owner) |
 | `/lessons [tag]` | Search what Atlas has learned |
 | `/log-correction "<wrong> -> <right>"` | Log a correction so it isn't repeated |
 | `/retro <run_id>` | Force a post-run retrospective |
@@ -348,9 +321,9 @@ The full reference is below — expand what you're curious about.
 | Command | What it does |
 |---|---|
 | `/connect <source>` | Register and test a data source (read-only) |
-| `/setup` | Onboarding interview — teach Atlas your role, data, and context |
-| `/clean <source>` | Detect and fix data-quality issues into a clean layer (preview, then apply) |
-| `/catalog [source]` | Browse every dataset's health, owner, and freshness at a glance |
+| `/setup` | Onboarding interview |
+| `/clean <source>` | Detect and fix quality issues into a clean layer |
+| `/catalog [source]` | Every dataset's health, owner, and freshness |
 
 </details>
 
@@ -359,115 +332,26 @@ The full reference is below — expand what you're curious about.
 
 | Skill | What it covers |
 |---|---|
-| metric-decomposition | Breaking a metric change into mix vs. rate and per-segment drivers |
-| statistical-testing | Which test to use, statistical power, confidence intervals, seasonality |
-| root-cause-playbooks | Named recipes: revenue drop, margin compression, churn spike, funnel leak… |
-| advanced-analytics | Cohorts, forecasting, opportunity sizing, experiments, the A–F confidence grade |
-| data-profiling | The standard data-quality checks and how to read them |
-| data-repair | Fixing what data-profiling finds — safe, reversible repairs into a clean layer, raw data never touched |
-| data-connectors | Connecting to files and warehouses, safely and read-only |
-| sql-dialects | The differences between Snowflake / BigQuery / Postgres / Databricks / DuckDB |
-| validation-protocol | The independent re-derivation and veto rules the red-team uses |
-| narrative-craft | Answer-first executive writing; titles that make a claim, not a label |
-| deck-standards | Slide layout, chart choice, speaker notes, and appendix requirements |
-| guardrails-closeloop | Pairing every goal with a safety metric; owner + follow-up on every recommendation |
-| business-knowledge | The glossary, metric dictionary, ownership, and reusing proven queries |
-| memory-protocol | How lessons are recorded, de-duplicated, and promoted so mistakes stick fixed |
-| question-router | Classifying a question so a quick lookup doesn't trigger the full pipeline |
-| first-run-welcome | Orienting a new user and offering setup on first use |
+| metric-decomposition | Mix vs. rate and per-segment drivers |
+| statistical-testing | Which test, statistical power, confidence intervals, seasonality |
+| root-cause-playbooks | Named recipes: revenue drop, margin compression, churn spike, funnel leak |
+| advanced-analytics | Cohorts, forecasting, sizing, experiments, the A–F confidence grade |
+| data-profiling | The standard quality battery and how to read it |
+| data-repair | Safe, reversible repairs into a clean layer |
+| data-connectors | Connecting to files and warehouses, read-only |
+| sql-dialects | Snowflake / BigQuery / Postgres / Databricks / DuckDB differences |
+| validation-protocol | The re-derivation and veto rules the red team uses |
+| narrative-craft | Answer-first writing; titles that make a claim, not a label |
+| deck-standards | Slide layout, chart choice, speaker notes, appendix |
+| guardrails-closeloop | Every goal paired with a safety metric; owner + follow-up on every rec |
+| business-knowledge | Glossary, metric dictionary, ownership, reusing proven queries |
+| memory-protocol | How lessons are recorded, de-duplicated, and promoted |
+| question-router | Classifying a question so a lookup doesn't trigger the full pipeline |
+| first-run-welcome | Orienting a new user on first use |
 
 </details>
 
 ---
 
-## What Atlas can and can't do
-
-Honesty is part of the product, so here are the limits stated plainly:
-
-- **It's a power tool for an analyst, not a replacement for one.** It handles roughly
-  the 80% of an analysis that eats all the time. **You (or your analyst) are the final
-  check** — run it first on questions you already know the answer to, so you can catch
-  and correct it.
-- **It needs your business context.** The more you teach it your metrics, your product
-  names, and your definitions, the better it gets. It learns from your corrections and
-  won't make the same mistake twice.
-- **Some capabilities need the right data.** Forecasting needs enough history;
-  retention/cohort analysis needs a customer identifier in the data. When the data can't
-  support something, Atlas tells you — it doesn't fake it.
-- **Connecting live systems is a setup step.** Spreadsheets and files work immediately.
-  Data warehouses (Snowflake, BigQuery, Postgres, Databricks) need a one-time, read-only
-  connection set up by your technical team.
-
----
-
-## Getting your first analysis
-
-The best way to build trust is to start where you can check the answer:
-
-1. **Pick a question you already know the answer to** — a report you were going to run
-   anyway this week.
-2. **Have your analyst point Atlas at the data and ask it.** The first run takes a little
-   longer because you're teaching it your context; by the third, it's faster than doing
-   it by hand.
-3. **Read the deck critically.** Look at the headline, the confidence grade, and the
-   Assumptions page. Because you know this data, you'll spot anything off immediately.
-4. **Correct anything wrong.** Atlas records the correction and applies it from then on.
-   That's the whole loop — look, check, correct, move on.
-
-Do that a few times and you'll trust it on the questions you *don't* already know the
-answer to.
-
----
-
-## Appendix — for your technical team
-
-Atlas runs inside [Claude Code](https://claude.com/claude-code). It's a Python project
-managed with [`uv`](https://github.com/astral-sh/uv); the analytical engine is
-deterministic and fully tested, separate from the AI layer.
-
-```bash
-# setup
-uv venv --python 3.13.9
-uv pip install -e ".[dev]"          # core; add ".[warehouse]" to connect a warehouse
-
-# run the full pipeline on the bundled example, no API key needed
-uv run python -c "from atlas.orchestrator import run_analysis; \
-r = run_analysis('Why did EMEA gross margin drop 4pts in Q2?'); \
-print(r.status, '|', r.headline); print(r.run_dir)"
-
-# the test suite
-uv run pytest -q
-
-# clean a data source before analysis (Data Quality Copilot)
-uv run python -c "from atlas.connectors.registry import Registry; \
-from atlas.connectors.base import TableRef; from atlas.quality import clean_layer as cl; \
-pv = cl.preview(Registry().connector('Sales'), TableRef('Sales')); \
-print('quality', pv.before.overall_score, '->', pv.after.overall_score)"
-```
-
-The Data Quality Copilot lives in `atlas/quality/` (pluggable repair modules,
-10-dimension score, semantic clean layer, readiness gate). Repair behaviour is
-config-driven (`atlas/quality/rules/*.yaml`); new repair modules and whole new
-copilots register without touching core code.
-
-Every run writes a complete audit trail to `runs/<run_id>/` — the brief, the data
-profile, the queries and their results, the findings, the red-team validation, the
-narrative, the deck (`.pptx` + `.html`), the comms drafts, and `provenance.json` (the
-number-to-query ledger). Analysts drive Atlas through the **28 slash commands, 18
-specialist agents, and 16 skills** listed in
-[*Under the hood*](#under-the-hood--the-team-the-playbooks-and-the-menu) above; each
-agent, command, and skill is a plain markdown file in `.claude/` that you can read and
-edit. Data sources are registered read-only in `atlas/connectors/sources.yaml`.
-
-- **The rules Atlas operates under:** `CLAUDE.md` (the project constitution — the
-  non-negotiables described above, in full).
-- **The analytical engine:** `atlas/` (connectors, the provenance ledger, the
-  decomposition/forecast/sizing math, the quality gates, the deck builders). It's
-  pluggable — new analysis types and export formats register as plugins under
-  `atlas/playbooks/` and `atlas/exporters/` respectively, without touching core code;
-  see `CLAUDE.md` for the extension points.
-- **The specialist agents, commands, and skills:** the `.claude/` folder.
-
-Atlas is read-only to every data source, enforced in two independent places, and no
-figure reaches any output — deck, web page, or Slack message — without resolving in the
-provenance ledger first.
+Built on [Claude Code](https://claude.com/claude-code). Python 3.13 via
+[`uv`](https://github.com/astral-sh/uv). MIT licensed.

@@ -1,0 +1,77 @@
+{
+  "run_id": "r-20260730-061556",
+  "claims": [
+    {
+      "claim_id": "c_base_rate",
+      "text": "Overall 'Churn' rate",
+      "value": 47.37,
+      "query_hash": "4f7b4a6fa470fe8e",
+      "result_hash": "9c43fa4dddcfaba3",
+      "evidence_tier": "decomposed",
+      "slide_number": null,
+      "notes": "measured directly from the source",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_thresh_payment_delay",
+      "text": "'Payment Delay' has a threshold effect at [16.0, 21.0]: the rate steps by 61.2% across the cut, not gradually",
+      "value": 0.6119,
+      "query_hash": "183edb6fc26780f1",
+      "result_hash": "18cef1e73c939fc0",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "cliff_jump; n=64374",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_thresh_support_calls",
+      "text": "'Support Calls' has a threshold effect at [4.0, 5.0]: the rate steps by 35.4% across the cut, not gradually",
+      "value": 0.3545,
+      "query_hash": "6624c9ef0781b7a0",
+      "result_hash": "a92391ed908a29eb",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "cliff_jump; n=64374",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_thresh_tenure",
+      "text": "'Tenure' has a threshold effect at [6.0, 24.0]: the rate steps by 25.6% across the cut, not gradually",
+      "value": 0.2565,
+      "query_hash": "e93c3bf4ebe103e0",
+      "result_hash": "df1b75956c6ea4ac",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "cliff_jump; n=64374",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_thresh_usage_frequency",
+      "text": "'Usage Frequency' has a threshold effect at [3.0, 6.0]: the rate steps by 23.9% across the cut, not gradually",
+      "value": 0.239,
+      "query_hash": "e943f2134b9c4331",
+      "result_hash": "2147c228fc865d62",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "cliff_jump; n=64374",
+      "derivation": "",
+      "parent_claims": []
+    },
+    {
+      "claim_id": "c_f_group_gender",
+      "text": "'Gender' splits the outcome: 'Male' runs 38.6% vs 47.4% overall (-8.8pp, n=30,021)",
+      "value": -8.7888,
+      "query_hash": "226090e853703a26",
+      "result_hash": "2cbb5d11ffbc53e7",
+      "evidence_tier": "tested",
+      "slide_number": null,
+      "notes": "rate_gap_pp; n=64374",
+      "derivation": "",
+      "parent_claims": []
+    }
+  ]
+}

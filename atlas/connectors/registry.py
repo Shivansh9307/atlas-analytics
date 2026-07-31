@@ -78,6 +78,10 @@ class Registry:
         if spec.kind == "file":
             p = spec.raw.get("path", "")
             return (PATHS.root / p).exists() if not os.path.isabs(p) else Path(p).exists()
+        if spec.kind == "joined_csv":
+            def _exists(p: str) -> bool:
+                return (PATHS.root / p).exists() if not os.path.isabs(p) else Path(p).exists()
+            return all(_exists(p) for p in (spec.raw.get("sources") or {}).values())
         # warehouse: require the primary connection env vars to be present
         required_hint = {
             "postgres": ["host_env", "user_env"],
@@ -91,6 +95,19 @@ class Registry:
         """Instantiate the adapter for `name`. Raises if dormant/unsupported."""
         spec = self.get_spec(name)
         raw = spec.raw
+
+        if spec.kind == "joined_csv":
+            from atlas.connectors.multi_csv_join import MultiCsvJoinConnector
+            sources = {
+                alias: (p if os.path.isabs(p) else str(PATHS.root / p))
+                for alias, p in raw["sources"].items()
+            }
+            return MultiCsvJoinConnector(
+                name=name, sources=sources, view_sql=raw["view_sql"],
+                table_name=raw.get("table_name", name),
+                store=store, row_limit=raw.get("row_limit"),
+                extra_views=raw.get("extra_views"),
+            )
 
         if spec.dialect == "duckdb" or spec.kind == "file":
             path = raw["path"]

@@ -1,0 +1,41 @@
+{
+  "table": "returns_risk_orders_nonquality_model",
+  "target": "non_quality_return",
+  "target_kind": "binary",
+  "entity": "order_id",
+  "numeric": [
+    "avg_discount_pct",
+    "total_cost",
+    "total_quantity",
+    "total_revenue"
+  ],
+  "categorical": [
+    "customer_city",
+    "customer_gender",
+    "customer_loyalty_tier",
+    "dominant_subcategory",
+    "employee_role",
+    "num_distinct_categories",
+    "num_line_items",
+    "order_year",
+    "payment_method",
+    "store_name"
+  ],
+  "exclude": [
+    "customer_id",
+    "dominant_product_id",
+    "non_quality_return",
+    "order_date",
+    "order_id"
+  ],
+  "exclude_reasons": {
+    "customer_id": "2945 distinct text values (> 50) \u2014 reads as an identifier, not a segment",
+    "dominant_product_id": "345 distinct text values (> 50) \u2014 reads as an identifier, not a segment",
+    "order_date": "unsupported dtype DATE",
+    "non_quality_return": "the target being explained",
+    "order_id": "entity identifier"
+  },
+  "binnings": [],
+  "tier_policy_profile": "default",
+  "notes": []
+}
