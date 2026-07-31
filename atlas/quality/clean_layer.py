@@ -87,11 +87,18 @@ class CleanPlan:
         }
 
 
-def build_plan(con: Connector, table: TableRef, source: str | None = None) -> CleanPlan:
-    """Detect issues and turn each into a sequenced, approvable Transform."""
+def build_plan(con: Connector, table: TableRef, source: str | None = None, *,
+              issues: list | None = None) -> CleanPlan:
+    """Detect issues and turn each into a sequenced, approvable Transform.
+
+    Pass `issues` when the caller already ran `detect_issues()` (e.g.
+    `run_copilot`) — `detect_issues` re-scans every column and is not free;
+    recomputing it here on top of an already-computed result is pure waste,
+    and on a wide joined view it is the difference between a node finishing
+    and timing out."""
     source = source or con.name
     base = table.name
-    issues = detect_issues(con, table)
+    issues = issues if issues is not None else detect_issues(con, table)
     schema = con.get_schema(table)
     thr = auto_apply_confidence()
     transforms: list[Transform] = []
@@ -209,15 +216,20 @@ class ApplyResult:
 
 def apply(con: Connector, table: TableRef, source: str | None = None, *,
           approve: bool = False, user: str = "operator",
-          run_dir: Path | None = None, persist: bool = True) -> ApplyResult:
+          run_dir: Path | None = None, persist: bool = True,
+          plan: CleanPlan | None = None) -> ApplyResult:
     """Materialise the clean layer, persist the manifest, write the audit trail.
 
     Auto-applies transforms at/above the confidence floor; those below apply only
     when `approve=True` (the human-approval path). `persist=False` materialises the
     clean layer and writes the run-dir audit but does NOT write the durable
-    per-source manifest (used inside /analyze, where the clean layer is per-run)."""
+    per-source manifest (used inside /analyze, where the clean layer is per-run).
+
+    Pass `plan` when the caller already built one (e.g. `run_copilot`, which
+    also already ran `detect_issues`) — otherwise this recomputes both from
+    scratch, tripling the detection cost for no reason."""
     source = source or con.name
-    plan = build_plan(con, table, source)
+    plan = plan if plan is not None else build_plan(con, table, source)
     thr = auto_apply_confidence()
 
     applied, skipped = [], []
