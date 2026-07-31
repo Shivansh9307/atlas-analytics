@@ -33,15 +33,22 @@ class CsvDuckDBConnector(Connector):
         sheet: str | int | None = None,
         store: QueryStore | None = None,
         row_limit: int | None = None,
+        derived_columns: dict[str, str] | None = None,
     ):
         super().__init__(name, store)
         self.path = Path(path)
         self.table_name = table_name or _safe_ident(self.path.stem)
         self.sheet = sheet
         self.row_limit = row_limit
+        self.derived_columns = dict(derived_columns or {})
         self.warnings: list[str] = []
         self._con = duckdb.connect(database=":memory:")
+        # Raw ingestion lands in a private base view; the public `table_name` view
+        # is always a projection over it, so appending derived columns never
+        # requires a view to reference itself (DuckDB rejects that as recursion).
+        self._base_name = f"_{self.table_name}_base"
         self._register()
+        self._apply_derived_columns()
 
     # ---- registration ----
     def _register(self) -> None:
@@ -53,18 +60,76 @@ class CsvDuckDBConnector(Connector):
         lit = _sql_literal(str(self.path))
         if suffix in (".csv", ".tsv"):
             sep = "\t" if suffix == ".tsv" else ","
-            self._con.execute(
-                f"CREATE VIEW {self.table_name} AS SELECT * FROM "
-                f"read_csv_auto({lit}, sep={_sql_literal(sep)}, header=true)"
-            )
+            try:
+                self._con.execute(
+                    f"CREATE VIEW {self._base_name} AS SELECT * FROM "
+                    f"read_csv_auto({lit}, sep={_sql_literal(sep)}, header=true)"
+                )
+            except duckdb.Error as e:
+                if "not utf-8 encoded" not in str(e).lower() and "invalid unicode" not in str(e).lower():
+                    raise
+                self._register_csv_non_utf8(sep)
         elif suffix in (".xlsx", ".xls"):
             self._register_excel()
         elif suffix == ".parquet":
             self._con.execute(
-                f"CREATE VIEW {self.table_name} AS SELECT * FROM read_parquet({lit})"
+                f"CREATE VIEW {self._base_name} AS SELECT * FROM read_parquet({lit})"
             )
         else:
             raise ValueError(f"unsupported file type: {suffix}")
+        self._con.execute(
+            f"CREATE VIEW {self.table_name} AS SELECT * FROM {self._base_name}"
+        )
+
+    def _apply_derived_columns(self) -> None:
+        """Add operator-declared computed columns (sources.yaml `derived_columns`).
+
+        A read-only projection over already-read columns — never a write to the
+        source, and always a declared assumption (not a guessed target). Lets a
+        playbook bind a business-defined flag (e.g. 'is this row profitable?')
+        that the raw file has no literal column for, without hardcoding the
+        formula into the generic connector.
+        """
+        if not self.derived_columns:
+            return
+        exprs = ", ".join(
+            f"({expr}) AS {_q_ident(col)}" for col, expr in self.derived_columns.items()
+        )
+        self._con.execute(
+            f"CREATE OR REPLACE VIEW {self.table_name} AS "
+            f"SELECT *, {exprs} FROM {self._base_name}"
+        )
+        self.warnings.append(
+            "derived column(s) declared in sources.yaml: "
+            + ", ".join(f"{c} = {e}" for c, e in self.derived_columns.items())
+        )
+
+    def _register_csv_non_utf8(self, sep: str) -> None:
+        """Fallback for a CSV that fails DuckDB's UTF-8 validation.
+
+        Windows-1252 exports (smart quotes, non-breaking spaces) are the common
+        case; DuckDB's reader has no windows-1252 mode, so re-read via pandas
+        (which does) and register the resulting frame as the view — same pattern
+        already used for Excel. The source file itself is never rewritten.
+        """
+        import pandas as pd
+
+        for enc in ("cp1252", "latin-1"):
+            try:
+                df = pd.read_csv(self.path, sep=sep, encoding=enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"could not decode {self.path} as utf-8, cp1252, or latin-1")
+        self.warnings.append(
+            f"source file is not UTF-8 encoded; re-read as {enc}. "
+            "Check for mojibake in free-text columns."
+        )
+        self._con.register(f"_{self.table_name}_df", df)
+        self._con.execute(
+            f"CREATE VIEW {self._base_name} AS SELECT * FROM _{self.table_name}_df"
+        )
 
     def _register_excel(self) -> None:
         """Normalise Excel (the usual mess) into a clean DuckDB table."""
@@ -88,7 +153,7 @@ class CsvDuckDBConnector(Connector):
         df = df.dropna(how="all")  # drop phantom all-empty rows
         self._con.register(f"_{self.table_name}_df", df)
         self._con.execute(
-            f"CREATE VIEW {self.table_name} AS SELECT * FROM _{self.table_name}_df"
+            f"CREATE VIEW {self._base_name} AS SELECT * FROM _{self.table_name}_df"
         )
 
     # ---- semantic clean layer -------------------------------------------
